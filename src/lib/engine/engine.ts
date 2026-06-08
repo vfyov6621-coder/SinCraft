@@ -1,6 +1,7 @@
 // ==========================================
 // LiteCraft Engine - Optimized game loop
-// Directional rendering, FPS cap, crash protection
+// Frustum culling, FPS cap, crash protection
+// Flight mode (double-space)
 // ==========================================
 
 import { Renderer, MeshData } from './renderer';
@@ -17,6 +18,7 @@ export interface GameCallbacks {
   onPause: () => void;
   onRemotePlayersUpdate: (players: RemotePlayer[]) => void;
   onSlotChange: (slot: number) => void;
+  onFlightToggle: (flying: boolean) => void;
 }
 
 export interface GameStats {
@@ -26,6 +28,7 @@ export interface GameStats {
   chunksVisible: number;
   chunksTotal: number;
   res: string;
+  flying: boolean;
 }
 
 export class Game {
@@ -51,14 +54,13 @@ export class Game {
   // Render settings
   renderDistance = 8;
   maxFps = 0; // 0 = unlimited (vsync)
-  directionalRendering = true; // only render chunks in view cone
 
   // FPS cap timing
   private lastRenderTime = 0;
   private minFrameInterval = 0; // ms between frames (0 = no cap)
 
   // Dirty chunk rebuild limit (prevents freeze on mass changes)
-  private maxChunkRebuildsPerFrame = 4;
+  private maxChunkRebuildsPerFrame = 6;
   private pendingDirtyChunks: { cx: number; cz: number }[] = [];
 
   selectedSlot = 0;
@@ -80,6 +82,7 @@ export class Game {
       onPause: () => {},
       onRemotePlayersUpdate: () => {},
       onSlotChange: () => {},
+      onFlightToggle: () => {},
     };
   }
 
@@ -126,6 +129,11 @@ export class Game {
       this.player.z = spawn.z;
     }
 
+    // Set up flight toggle callback
+    this.player.onFlightToggle = (flying) => {
+      this.callbacks.onFlightToggle(flying);
+    };
+
     // Build initial chunk meshes
     this.rebuildAllChunkMeshes();
 
@@ -170,24 +178,18 @@ export class Game {
     this.chunkMeshes.clear();
     this.pendingDirtyChunks = [];
 
-    // Build meshes for all non-empty chunks (in batches to avoid freeze)
-    const chunksToBuild: { cx: number; cz: number }[] = [];
+    // Build meshes for all non-empty chunks
     for (const [, chunk] of this.world.chunks) {
       if (!chunk.isEmpty()) {
-        chunksToBuild.push({ cx: chunk.cx, cz: chunk.cz });
-      }
-    }
-
-    // Build all upfront (needed for initial load)
-    for (const { cx, cz } of chunksToBuild) {
-      try {
-        const key = `${cx},${cz}`;
-        const data = this.world.buildChunkMesh(cx, cz);
-        if (data) {
-          this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices));
+        try {
+          const key = `${chunk.cx},${chunk.cz}`;
+          const data = this.world.buildChunkMesh(chunk.cx, chunk.cz);
+          if (data) {
+            this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices));
+          }
+        } catch (err) {
+          console.error(`Failed to build mesh for chunk ${chunk.cx},${chunk.cz}:`, err);
         }
-      } catch (err) {
-        console.error(`Failed to build mesh for chunk ${cx},${cz}:`, err);
       }
     }
   }
@@ -196,7 +198,11 @@ export class Game {
     // Collect new dirty chunks
     const newDirty = this.world.getAndClearDirtyChunks();
     for (const chunk of newDirty) {
-      this.pendingDirtyChunks.push({ cx: chunk.cx, cz: chunk.cz });
+      // Avoid duplicates in pending
+      const exists = this.pendingDirtyChunks.some(p => p.cx === chunk.cx && p.cz === chunk.cz);
+      if (!exists) {
+        this.pendingDirtyChunks.push({ cx: chunk.cx, cz: chunk.cz });
+      }
     }
 
     // Build limited number per frame to prevent freezes
@@ -219,6 +225,9 @@ export class Game {
         const data = this.world.buildChunkMesh(cx, cz);
         if (data) {
           this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices));
+        } else {
+          // Chunk became empty, remove mesh entry
+          this.chunkMeshes.delete(key);
         }
         built++;
       } catch (err) {
@@ -311,7 +320,9 @@ export class Game {
     this.canvas.addEventListener('contextmenu', this.onCanvasContextMenu);
   }
 
-  private onCanvasClick = () => { if (!this.paused && !this.contextLost) this.canvas.requestPointerLock(); };
+  private onCanvasClick = () => {
+    if (!this.paused && !this.contextLost) this.canvas.requestPointerLock();
+  };
   private onCanvasContextMenu = (e: Event) => e.preventDefault();
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -321,11 +332,23 @@ export class Game {
       case 'KeyS': case 'ArrowDown': this.player.moveBackward = true; break;
       case 'KeyA': case 'ArrowLeft': this.player.moveLeft = true; break;
       case 'KeyD': case 'ArrowRight': this.player.moveRight = true; break;
-      case 'Space': this.player.wantJump = true; e.preventDefault(); break;
+      case 'Space':
+        // Double-tap detection for flight toggle
+        const now = performance.now();
+        const toggled = this.player.handleSpacePress(now);
+        if (!toggled) {
+          this.player.wantJump = true;
+        }
+        e.preventDefault();
+        break;
+      case 'ShiftLeft': case 'ShiftRight':
+        this.player.wantSneak = true;
+        break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         this.selectedSlot = parseInt(e.code.charAt(5)) - 1;
-        this.callbacks.onSlotChange(this.selectedSlot); break;
+        this.callbacks.onSlotChange(this.selectedSlot);
+        break;
     }
   };
 
@@ -336,6 +359,7 @@ export class Game {
       case 'KeyA': case 'ArrowLeft': this.player.moveLeft = false; break;
       case 'KeyD': case 'ArrowRight': this.player.moveRight = false; break;
       case 'Space': this.player.wantJump = false; break;
+      case 'ShiftLeft': case 'ShiftRight': this.player.wantSneak = false; break;
     }
   };
 
@@ -378,6 +402,12 @@ export class Game {
     }
   }
 
+  resumeGame() {
+    this.paused = false;
+    // Re-lock pointer when resuming
+    this.canvas.requestPointerLock();
+  }
+
   // --- Game loop ---
   start() {
     this.running = true; this.lastTime = performance.now(); this.lastRenderTime = 0;
@@ -398,13 +428,17 @@ export class Game {
       const dt = Math.min((now - this.lastTime) / 1000, 0.1);
       this.lastTime = now;
 
-      // FPS counter (always counts, even if we skip rendering)
+      // FPS counter
       this.fpsFrames++; this.fpsTime += dt;
-      if (this.fpsTime >= 0.5) { this.currentFps = Math.round(this.fpsFrames / this.fpsTime); this.fpsFrames = 0; this.fpsTime = 0; }
+      if (this.fpsTime >= 0.5) {
+        this.currentFps = Math.round(this.fpsFrames / this.fpsTime);
+        this.fpsFrames = 0; this.fpsTime = 0;
+      }
 
-      // Physics and input always run (no FPS cap for logic)
+      // Rebuild dirty chunks (even when paused for consistency)
       this.rebuildDirtyChunks();
 
+      // Physics always runs when not paused
       if (!this.paused && !this.contextLost) {
         this.player.update(dt, this.world);
 
@@ -431,7 +465,7 @@ export class Game {
       const h = this.canvas.height;
       if (w === 0 || h === 0) return;
 
-      const aspect = w / h;
+      const aspect = w / Math.max(1, h);
       const fogFar = this.renderDistance * CHUNK_SIZE + 20;
       const proj = mat4Perspective(Math.PI / 3, aspect, 0.05, fogFar);
       const eyePos: [number, number, number] = [this.player.x, this.player.y + this.player.eyeHeight, this.player.z];
@@ -442,48 +476,38 @@ export class Game {
       this.renderer.viewMatrix = view;
       this.renderer.cameraPos = eyePos;
 
-      // Compute frustum planes for culling
+      // Compute frustum planes for culling (only frustum, no directional)
       const vp = mat4Multiply(proj, view);
       const frustum = extractFrustumPlanes(vp);
 
       // Begin rendering
       this.renderer.beginFrame();
 
-      // Render visible chunks with directional culling
+      // Render visible chunks with frustum culling only
       let chunksVisible = 0;
       const playerCX = (this.player.x / CHUNK_SIZE) | 0;
       const playerCZ = (this.player.z / CHUNK_SIZE) | 0;
       const rd = this.renderDistance;
       const rdSq = rd * rd;
-      const halfH = this.world.worldHeight / 2;
-      const playerYaw = this.player.yaw;
+      const worldH = this.world.worldHeight;
+      const halfSizeXZ = CHUNK_SIZE / 2;
+      const halfSizeY = worldH / 2;
+      const centerY = halfSizeY;
 
       for (const [key, mesh] of this.chunkMeshes) {
         const comma = key.indexOf(',');
         const cx = parseInt(key.substring(0, comma));
         const cz = parseInt(key.substring(comma + 1));
 
-        // Distance check (circular)
+        // Distance check (circular, chunk-level)
         const dx = cx - playerCX;
         const dz = cz - playerCZ;
         if (dx * dx + dz * dz > rdSq) continue;
 
-        // Directional culling: skip chunks behind the player
-        if (this.directionalRendering) {
-          const angleToChunk = Math.atan2(dx, -dz);
-          let angleDiff = angleToChunk - playerYaw;
-          // Normalize to [-PI, PI]
-          if (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
-          if (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-          // ~130 degrees from center = skip (render ~260 degree arc)
-          if (Math.abs(angleDiff) > 2.27) continue;
-        }
-
-        // Frustum culling
-        const chunkCenterX = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
-        const chunkCenterZ = cz * CHUNK_SIZE + CHUNK_SIZE / 2;
-        const halfSize = CHUNK_SIZE / 2;
-        if (!isAABBVisible(chunkCenterX, halfH, chunkCenterZ, halfSize, halfH, halfSize, frustum)) continue;
+        // Frustum culling: AABB = chunk in world space
+        const chunkCenterX = cx * CHUNK_SIZE + halfSizeXZ;
+        const chunkCenterZ = cz * CHUNK_SIZE + halfSizeXZ;
+        if (!isAABBVisible(chunkCenterX, centerY, chunkCenterZ, halfSizeXZ, halfSizeY, halfSizeXZ, frustum)) continue;
 
         this.renderer.renderMesh(mesh);
         chunksVisible++;
@@ -504,6 +528,7 @@ export class Game {
         chunksVisible,
         chunksTotal: this.world.chunks.size,
         res: `${w}x${h}`,
+        flying: this.player.flying,
       });
       if (this.network) this.callbacks.onRemotePlayersUpdate(Array.from(this.network.remotePlayers.values()));
 
@@ -525,11 +550,12 @@ export class Game {
     this.stop();
     this.stopNetwork();
     window.removeEventListener('resize', this.handleResize);
-    // Delete all chunk meshes
+    // Delete all chunk meshes - CRITICAL for preventing memory leak
     for (const mesh of this.chunkMeshes.values()) {
       try { this.renderer.deleteMesh(mesh); } catch {}
     }
     this.chunkMeshes.clear();
+    this.pendingDirtyChunks = [];
     try { this.renderer.destroy(); } catch {}
   }
 }

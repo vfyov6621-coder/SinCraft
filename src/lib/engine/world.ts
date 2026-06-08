@@ -209,154 +209,154 @@ export class VoxelWorld {
     const D = this.worldDepth;
     const H = this.worldHeight;
 
-    // Fill the bottom layer with stone (void floor at y=0)
+    // Fill bottom layer with stone (void floor)
     for (let x = 0; x < W; x++) {
       for (let z = 0; z < D; z++) {
         this.setBlock(x, 0, z, BlockType.Stone);
       }
     }
 
-    // Calculate number of levels based on world height
-    // Each level is about 8-10 blocks tall
+    // Each level is about 8 blocks tall
     const levelStep = 8;
-    const numLevels = Math.max(2, Math.floor((H - 8) / levelStep));
+    const numLevels = Math.max(2, Math.floor((H - 16) / levelStep));
 
-    // Block types per level for visual variety
+    // Block types per level
     const levelBlocks: number[] = [
       BlockType.Planks,
       BlockType.Cobblestone,
       BlockType.Sand,
       BlockType.Snow,
       BlockType.Planks,
+      BlockType.Cobblestone,
     ];
 
-    // Starting platform (large, at level 0)
+    // ---- Starting platform (large, at y=3) ----
     const startY = 3;
     const startSize = 6;
-    const startX = Math.floor(W / 2) - Math.floor(startSize / 2);
-    const startZ = Math.floor(D / 2) - Math.floor(startSize / 2);
+    const startX = 3;
+    const startZ = 3;
 
-    for (let x = startX; x < startX + startSize && x < W; x++) {
-      for (let z = startZ; z < startZ + startSize && z < D; z++) {
-        for (let y = 1; y <= startY; y++) {
-          this.setBlock(x, y, z, y === startY ? BlockType.Planks : BlockType.Stone);
+    // Fill support under start platform
+    for (let x = startX; x < startX + startSize && x < W - 1; x++) {
+      for (let z = startZ; z < startZ + startSize && z < D - 1; z++) {
+        for (let y = 1; y < startY; y++) {
+          this.setBlock(x, y, z, BlockType.Stone);
         }
+        this.setBlock(x, startY, z, BlockType.Planks);
       }
     }
 
-    // Generate parkour path per level
-    let prevEndX = startX + startSize;
-    let prevEndZ = startZ + Math.floor(startSize / 2);
+    // ---- Generate parkour path across levels ----
+    // Track position for path generation
+    let curX = startX + startSize;
+    let curZ = startZ + Math.floor(startSize / 2);
+    let curY = startY;
 
     for (let level = 0; level < numLevels; level++) {
-      const baseY = startY + level * levelStep;
-      const surfaceY = baseY;
       const surfaceBlock = levelBlocks[level % levelBlocks.length];
-      const supportBlock = BlockType.Stone;
 
-      // Number of platforms per level (more at lower levels)
+      // Number of platforms on this level (4-7)
       const platformsPerLevel = 4 + Math.floor(rng() * 4);
 
-      // Current position for this level's path
-      let cx = level === 0 ? prevEndX : 4 + Math.floor(rng() * 6);
-      let cz = level === 0 ? prevEndZ : 4 + Math.floor(rng() * (D - 10));
-      let dirX = 1;
-      let dirZ = 0;
-
       for (let p = 0; p < platformsPerLevel; p++) {
-        // Gap between platforms (2-3 blocks - jumpable)
-        const gap = 2 + Math.floor(rng() * 2);
-        // Platform size (3-6 blocks)
-        const size = 3 + Math.floor(rng() * 4);
+        // Gap: 2-4 blocks (jumpable distance)
+        const gap = 2 + Math.floor(rng() * 3);
+        // Platform size: 3-6 blocks
+        const pSize = 3 + Math.floor(rng() * 4);
 
-        // Move to next platform position
-        cx += dirX * gap;
-        cz += dirZ * gap;
+        // Move in a direction (pick new direction periodically)
+        let dirX = 0, dirZ = 0;
+        const dirRoll = rng();
+        if (dirRoll < 0.5) { dirX = 1; dirZ = 0; }
+        else if (dirRoll < 0.75) { dirX = -1; dirZ = 0; }
+        else if (dirRoll < 0.875) { dirX = 0; dirZ = 1; }
+        else { dirX = 0; dirZ = -1; }
 
-        // Clamp to world bounds
-        if (cx < 2 || cx + size >= W - 2 || cz < 2 || cz + size >= D - 2) {
-          // Change direction and reposition
-          cx = Math.max(3, Math.min(W - size - 3, Math.floor(W / 2) + Math.floor(rng() * 20) - 10));
-          cz = Math.max(3, Math.min(D - size - 3, Math.floor(D / 2) + Math.floor(rng() * 20) - 10));
-          dirX = rng() < 0.5 ? 1 : -1;
-          dirZ = 0;
+        // Calculate next position
+        let nx = curX + dirX * gap;
+        let nz = curZ + dirZ * gap;
+
+        // Bounds checking - keep platform inside world
+        if (nx < 1 || nx + pSize >= W - 1 || nz < 1 || nz + pSize >= D - 1) {
+          // Pick a safe random position
+          nx = 2 + Math.floor(rng() * Math.max(1, W - pSize - 4));
+          nz = 2 + Math.floor(rng() * Math.max(1, D - pSize - 4));
         }
 
-        // Build platform
-        for (let px = cx; px < cx + size && px < W - 1; px++) {
-          for (let pz = cz; pz < cz + size && pz < D - 1; pz++) {
-            // Surface
-            this.setBlock(px, surfaceY, pz, surfaceBlock);
-            // Support pillars underneath (every 2 blocks)
-            if ((px - cx) % 2 === 0 && (pz - cz) % 2 === 0) {
-              for (let y = 1; y < surfaceY; y++) {
-                this.setBlock(px, y, pz, supportBlock);
+        // Build the platform
+        let placed = false;
+        for (let px = nx; px < nx + pSize && px < W - 1; px++) {
+          for (let pz = nz; pz < nz + pSize && pz < D - 1; pz++) {
+            // Support column from y=1 to curY-1 (only at corners for performance)
+            if (px === nx && pz === nz || px === nx + pSize - 1 && pz === nz ||
+                px === nx && pz === nz + pSize - 1 || px === nx + pSize - 1 && pz === nz + pSize - 1) {
+              for (let y = 1; y < curY; y++) {
+                this.setBlock(px, y, pz, BlockType.Stone);
+              }
+            }
+            this.setBlock(px, curY, pz, surfaceBlock);
+            placed = true;
+          }
+        }
+
+        if (placed) {
+          curX = nx;
+          curZ = nz + Math.floor(pSize / 2);
+        }
+      }
+
+      // ---- Transition to next level: upward staircase ----
+      if (level < numLevels - 1) {
+        const nextY = curY + levelStep;
+        // Place 2-3 stepping stones going upward
+        const stepsCount = 2 + Math.floor(rng() * 2);
+        for (let step = 0; step < stepsCount; step++) {
+          const stepX = curX + 1 + step;
+          const stepZ = curZ;
+          const stepY = curY + 1 + Math.floor((step / stepsCount) * levelStep);
+
+          if (stepX < W - 1 && stepZ >= 1 && stepZ < D - 1 && stepY < H - 2) {
+            // Build a small 2x2 platform at each step height
+            for (let dx = 0; dx < 2; dx++) {
+              for (let dz = -1; dz <= 0; dz++) {
+                const bx = stepX + dx;
+                const bz = stepZ + dz;
+                if (bx >= 1 && bx < W - 1 && bz >= 1 && bz < D - 1) {
+                  // Support pillar
+                  for (let y = 1; y < stepY; y++) {
+                    this.setBlock(bx, y, bz, BlockType.Stone);
+                  }
+                  // Surface
+                  this.setBlock(bx, stepY, bz, BlockType.Planks);
+                }
               }
             }
           }
         }
+        curX += stepsCount + 1;
+        curY = nextY;
 
-        // Add walls/barriers on some platforms (obstacles)
-        if (rng() < 0.3 && size >= 4) {
-          const wallLen = Math.min(size - 2, 2 + Math.floor(rng() * 2));
-          const wallSide = Math.floor(rng() * 4);
-          for (let w = 0; w < wallLen; w++) {
-            let wx = cx, wz = cz;
-            switch (wallSide) {
-              case 0: wx = cx + 1 + w; wz = cz; break;           // front edge
-              case 1: wx = cx + size - 2; wz = cz + 1 + w; break; // right edge
-              case 2: wx = cx + w; wz = cz + size - 2; break;     // back edge
-              case 3: wx = cx; wz = cz + w; break;                 // left edge
-            }
-            this.setBlock(wx, surfaceY + 1, wz, BlockType.Cobblestone);
-          }
+        // Bounds reset if went too far
+        if (curX >= W - 8) {
+          curX = 3;
+          curZ = 3 + Math.floor(rng() * Math.max(1, D - 10));
         }
-
-        // Randomly change direction
-        if (rng() < 0.35) {
-          const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
-          const pick = dirs[Math.floor(rng() * dirs.length)];
-          dirX = pick[0];
-          dirZ = pick[1];
-        }
-
-        // Transition to next level: add stepping stones going UP
-        if (p === platformsPerLevel - 1 && level < numLevels - 1) {
-          const nextY = baseY + levelStep;
-          const midY = baseY + Math.floor(levelStep / 2);
-          // 2-3 stepping stones to jump upward
-          const stoneX = cx + size + 1;
-          const stoneZ = cz + Math.floor(size / 2);
-          for (let step = 0; step < 2; step++) {
-            const sy = midY + step * Math.floor(levelStep / 2);
-            if (stoneX + step < W - 1 && sy < H - 2) {
-              this.setBlock(stoneX + step, sy, stoneZ, BlockType.Planks);
-              this.setBlock(stoneX + step, sy - 1, stoneZ, BlockType.Stone);
-              // Small platform around the stone
-              if (stoneZ > 1) this.setBlock(stoneX + step, sy, stoneZ - 1, BlockType.Planks);
-              if (stoneZ + 1 < D - 1) this.setBlock(stoneX + step, sy, stoneZ + 1, BlockType.Planks);
-            }
-          }
-        }
-
-        // Update path end position
-        prevEndX = cx + size;
-        prevEndZ = cz + Math.floor(size / 2);
       }
     }
 
-    // Add a "finish" platform at the top
-    const finishY = startY + numLevels * levelStep;
+    // ---- Finish platform at the top ----
+    const finishY = curY;
     if (finishY < H - 4) {
-      const finishSize = 8;
-      const finishX = Math.floor(W / 2) - Math.floor(finishSize / 2);
-      const finishZ = Math.floor(D / 2) - Math.floor(finishSize / 2);
-      for (let x = finishX; x < finishX + finishSize && x < W; x++) {
-        for (let z = finishZ; z < finishZ + finishSize && z < D; z++) {
+      const finishSize = 6;
+      const finishX = Math.max(2, Math.min(W - finishSize - 2, Math.floor(W / 2) - 3));
+      const finishZ = Math.max(2, Math.min(D - finishSize - 2, Math.floor(D / 2) - 3));
+
+      for (let x = finishX; x < finishX + finishSize && x < W - 1; x++) {
+        for (let z = finishZ; z < finishZ + finishSize && z < D - 1; z++) {
           for (let y = 1; y <= finishY; y++) {
             this.setBlock(x, y, z, y === finishY ? BlockType.Snow : BlockType.Stone);
           }
-          // Pillar on corners
+          // Corner pillars
           if ((x === finishX || x === finishX + finishSize - 1) &&
               (z === finishZ || z === finishZ + finishSize - 1)) {
             for (let y = finishY + 1; y <= finishY + 3 && y < H; y++) {

@@ -18,7 +18,7 @@ import { Separator } from '@/components/ui/separator';
 import {
   Gauge, Triangle, Monitor, Info, Play, Plus, Trash2, Save, FolderOpen,
   Globe, Users, Pause, LogOut, ArrowLeft, Mountain, Waves, Trees, Box,
-  Loader2, Eye, Zap, Footprints,
+  Loader2, Eye, Zap, Footprints, Bird,
 } from 'lucide-react';
 
 type Screen = 'menu' | 'worlds' | 'create' | 'playing' | 'multiplayer';
@@ -56,15 +56,15 @@ export default function Home() {
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [screen, setScreen] = useState<Screen>('menu');
-  const [stats, setStats] = useState<GameStats>({ fps: 0, triangles: 0, drawCalls: 0, chunksVisible: 0, chunksTotal: 0, res: '0x0' });
+  const [stats, setStats] = useState<GameStats>({ fps: 0, triangles: 0, drawCalls: 0, chunksVisible: 0, chunksTotal: 0, res: '0x0', flying: false });
   const [ready, setReady] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState(0);
   const [showHelp, setShowHelp] = useState(true);
   const [paused, setPaused] = useState(false);
+  const [isFlying, setIsFlying] = useState(false);
   const [resolutionScale, setResolutionScale] = useState(0.75);
   const [renderDistance, setRenderDistance] = useState(8);
-  const [maxFps, setMaxFps] = useState(0); // 0 = unlimited
-  const [directionalRendering, setDirectionalRendering] = useState(true);
+  const [maxFps, setMaxFps] = useState(0);
   const [loadingText, setLoadingText] = useState('');
 
   // World creation settings
@@ -82,7 +82,6 @@ export default function Home() {
   const [playerName, setPlayerName] = useState('Steve');
   const [playerColor, setPlayerColor] = useState('#e74c3c');
 
-  // Load player name/color from localStorage on mount
   useEffect(() => {
     setPlayerName(localStorage.getItem('litecraft_name') || 'Steve');
     setPlayerColor(localStorage.getItem('litecraft_color') || '#e74c3c');
@@ -110,14 +109,16 @@ export default function Home() {
     if (gameRef.current) gameRef.current.setMaxFps(maxFps);
   }, [maxFps]);
 
-  useEffect(() => {
-    if (gameRef.current) gameRef.current.directionalRendering = directionalRendering;
-  }, [directionalRendering]);
-
   const togglePause = useCallback(() => {
     if (!gameRef.current) return;
     gameRef.current.togglePause();
     setPaused(p => !p);
+  }, []);
+
+  const resumeGame = useCallback(() => {
+    if (!gameRef.current) return;
+    gameRef.current.resumeGame();
+    setPaused(false);
   }, []);
 
   // ESC handler
@@ -125,12 +126,16 @@ export default function Home() {
     const handler = (e: KeyboardEvent) => {
       if (e.code === 'Escape' && screen === 'playing' && ready) {
         e.preventDefault();
-        togglePause();
+        if (paused) {
+          resumeGame();
+        } else {
+          togglePause();
+        }
       }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [screen, ready, togglePause]);
+  }, [screen, ready, togglePause, resumeGame, paused]);
 
   // Auto-save
   const startAutoSave = useCallback((worldId: string, worldName: string) => {
@@ -181,7 +186,6 @@ export default function Home() {
     setCurrentWorldId(id); setCurrentWorldName(name);
     setScreen('playing');
 
-    // Wait for canvas to mount
     await new Promise(r => setTimeout(r, 50));
     if (!canvasRef.current) return;
 
@@ -193,14 +197,14 @@ export default function Home() {
     game.callbacks.onPause = () => setPaused(true);
     game.callbacks.onRemotePlayersUpdate = (players) => setRemotePlayers(players.map(p => ({ id: p.id, name: p.name, color: p.color })));
     game.callbacks.onSlotChange = setSelectedSlot;
-    game.directionalRendering = directionalRendering;
+    game.callbacks.onFlightToggle = (flying) => setIsFlying(flying);
     game.init(settings, savedChunks, savedPlayer);
     gameRef.current = game;
     setLoadingText('');
 
     readyTimerRef.current = setTimeout(() => setReady(true), 100);
     startAutoSave(id, name);
-  }, [resolutionScale, renderDistance, maxFps, directionalRendering, startAutoSave]);
+  }, [resolutionScale, renderDistance, maxFps, startAutoSave]);
 
   // Load saved world
   const loadAndStartWorld = useCallback(async (worldId: string) => {
@@ -226,14 +230,14 @@ export default function Home() {
     game.callbacks.onPause = () => setPaused(true);
     game.callbacks.onRemotePlayersUpdate = (players) => setRemotePlayers(players.map(p => ({ id: p.id, name: p.name, color: p.color })));
     game.callbacks.onSlotChange = setSelectedSlot;
-    game.directionalRendering = directionalRendering;
+    game.callbacks.onFlightToggle = (flying) => setIsFlying(flying);
     game.init(meta.settings, chunks, { x: meta.playerX, y: meta.playerY, z: meta.playerZ, yaw: meta.playerYaw });
     gameRef.current = game;
     setLoadingText('');
 
     readyTimerRef.current = setTimeout(() => setReady(true), 100);
     startAutoSave(worldId, meta.name);
-  }, [resolutionScale, renderDistance, maxFps, directionalRendering, startAutoSave]);
+  }, [resolutionScale, renderDistance, maxFps, startAutoSave]);
 
   // Cleanup
   useEffect(() => {
@@ -250,7 +254,7 @@ export default function Home() {
     if (gameRef.current) { gameRef.current.destroy(); gameRef.current = null; }
     if (autoSaveTimerRef.current) clearInterval(autoSaveTimerRef.current);
     if (readyTimerRef.current) clearTimeout(readyTimerRef.current);
-    setReady(false); setPaused(false); setLoadingText('');
+    setReady(false); setPaused(false); setLoadingText(''); setIsFlying(false);
     setIsMultiplayer(false); setIsHost(false); setRemotePlayers([]);
     refreshWorlds();
     setScreen('menu');
@@ -496,12 +500,17 @@ export default function Home() {
 
   // ==================== PLAYING ====================
   return (
-    <div className="flex flex-col h-screen bg-gray-950 text-gray-100 overflow-hidden select-none">
+    <div className="flex flex-col h-screen bg-gray-950 text-gray-100 overflow-hidden select-none" style={{ cursor: paused ? 'default' : 'none' }}>
       {/* Header */}
       <header className="flex items-center justify-between px-3 py-1.5 bg-gray-900/90 border-b border-gray-800 z-20">
         <div className="flex items-center gap-2">
           <Triangle className="w-4 h-4 text-emerald-400" />
           <h1 className="text-sm font-bold">{currentWorldName}</h1>
+          {isFlying && (
+            <Badge variant="outline" className="text-[10px] border-sky-700 text-sky-400 gap-1">
+              <Bird className="w-3 h-3" /> Flying
+            </Badge>
+          )}
           {isMultiplayer && (
             <Badge variant="outline" className="text-[10px] border-emerald-700 text-emerald-400 gap-1">
               <Users className="w-3 h-3" /> {remotePlayers.length + 1}
@@ -600,14 +609,15 @@ export default function Home() {
                   <p><kbd className="px-1 py-0.5 bg-gray-800 rounded text-gray-300 font-mono text-[9px]">WASD</kbd> Move</p>
                   <p><kbd className="px-1 py-0.5 bg-gray-800 rounded text-gray-300 font-mono text-[9px]">Mouse</kbd> Look (click)</p>
                   <p><kbd className="px-1 py-0.5 bg-gray-800 rounded text-gray-300 font-mono text-[9px]">Space</kbd> Jump</p>
+                  <p><kbd className="px-1 py-0.5 bg-gray-800 rounded text-gray-300 font-mono text-[9px]">2x Space</kbd> Toggle Fly</p>
                   <p><kbd className="px-1 py-0.5 bg-gray-800 rounded text-gray-300 font-mono text-[9px]">LMB/RMB</kbd> Break/Place</p>
-                  <p><kbd className="px-1 py-0.5 bg-gray-800 rounded text-gray-300 font-mono text-[9px]">ESC</kbd> Pause</p>
+                  <p><kbd className="px-1 py-0.5 bg-gray-800 rounded text-gray-300 font-mono text-[9px]">ESC</kbd> Pause Menu</p>
                 </div>
               </Card>
             </div>
           )}
 
-          {/* Pause Menu */}
+          {/* ==================== PAUSE MENU ==================== */}
           {paused && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/60 z-30 backdrop-blur-sm">
               <Card className="bg-gray-900 border-gray-700 p-6 w-full max-w-xs mx-4 space-y-3">
@@ -622,12 +632,28 @@ export default function Home() {
                     </p>
                   )}
                 </div>
-                <Button onClick={() => { gameRef.current?.togglePause(); setPaused(false); }} className="w-full bg-emerald-600 hover:bg-emerald-500 gap-2">
+
+                {/* Resume button */}
+                <Button onClick={resumeGame} className="w-full bg-emerald-600 hover:bg-emerald-500 gap-2 h-11">
                   <Play className="w-4 h-4" /> Resume
                 </Button>
-                <Button onClick={() => manualSave()} variant="outline" className="w-full border-gray-700 gap-2">
+
+                {/* Save */}
+                <Button onClick={manualSave} variant="outline" className="w-full border-gray-700 gap-2">
                   <Save className="w-4 h-4" /> Save World
                 </Button>
+
+                {/* Flight toggle */}
+                <Button onClick={() => {
+                  if (gameRef.current) {
+                    gameRef.current.player.flying = !gameRef.current.player.flying;
+                    setIsFlying(gameRef.current.player.flying);
+                  }
+                }} variant="outline" className={`w-full gap-2 ${isFlying ? 'border-sky-700 text-sky-400 hover:bg-sky-950' : 'border-gray-700'}`}>
+                  <Bird className="w-4 h-4" /> {isFlying ? 'Disable Flying' : 'Enable Flying'}
+                </Button>
+
+                <Separator className="bg-gray-800" />
 
                 {/* Render settings */}
                 <div className="bg-gray-800/50 rounded-md p-2.5 space-y-2.5">
@@ -660,23 +686,9 @@ export default function Home() {
                       <span className="text-[9px] text-gray-600">240 max</span>
                     </div>
                   </div>
-
-                  <div className="flex items-center justify-between">
-                    <label className="text-[10px] text-gray-500 flex items-center gap-1"><Eye className="w-3 h-3" />Directional Render</label>
-                    <button
-                      onClick={() => setDirectionalRendering(!directionalRendering)}
-                      className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
-                        directionalRendering
-                          ? 'border-emerald-600 bg-emerald-950 text-emerald-400'
-                          : 'border-gray-600 bg-gray-900 text-gray-500'
-                      }`}
-                    >
-                      {directionalRendering ? 'ON' : 'OFF'}
-                    </button>
-                  </div>
-                  <p className="text-[9px] text-gray-600">Directional: only render chunks in front of you</p>
                 </div>
 
+                {/* Multiplayer */}
                 {!isMultiplayer && (
                   <Button onClick={hostGame} variant="outline" className="w-full border-gray-700 gap-2">
                     <Globe className="w-4 h-4" /> Host LAN Game
@@ -687,7 +699,10 @@ export default function Home() {
                     <Globe className="w-4 h-4" /> {isHost ? 'Hosting...' : 'Connected'}
                   </Button>
                 )}
+
                 <Separator className="bg-gray-800" />
+
+                {/* Quit */}
                 <Button onClick={quitToMenu} variant="outline" className="w-full border-red-800 hover:border-red-500 hover:bg-red-950 hover:text-red-400 gap-2">
                   <LogOut className="w-4 h-4" /> Save & Quit to Menu
                 </Button>
