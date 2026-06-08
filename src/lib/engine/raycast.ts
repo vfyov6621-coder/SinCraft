@@ -52,9 +52,9 @@ export function raycast(
       return {
         x, y, z,
         nx, ny, nz,
-        placeX: x - nx,
-        placeY: y - ny,
-        placeZ: z - nz,
+        placeX: x + nx,
+        placeY: y + ny,
+        placeZ: z + nz,
       };
     }
 

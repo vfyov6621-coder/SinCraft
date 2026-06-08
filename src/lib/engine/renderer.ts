@@ -1,6 +1,7 @@
 // ==========================================
 // Lightweight 3D Engine - WebGL 2 Renderer
-// Supports solid mesh + wireframe highlight
+// Multi-mesh rendering for chunks
+// Fixed highlight wireframe (no double draw)
 // ==========================================
 
 import { Mat4 } from './math';
@@ -56,25 +57,27 @@ const FRAGMENT_SHADER = `
   }
 `;
 
-// Simple shader for wireframe lines
+// Wireframe shader with model matrix support
 const LINE_VERT = `
   attribute vec3 aPosition;
   uniform mat4 uProjection;
   uniform mat4 uView;
+  uniform vec3 uOffset;
   void main() {
-    gl_Position = uProjection * uView * vec4(aPosition, 1.0);
+    gl_Position = uProjection * uView * vec4(aPosition + uOffset, 1.0);
   }
 `;
 
 const LINE_FRAG = `
   precision mediump float;
   void main() {
-    gl_FragColor = vec4(0.0, 0.0, 0.0, 0.6);
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 0.7);
   }
 `;
 
 export interface MeshData {
   vao: WebGLVertexArrayObject;
+  buffers: WebGLBuffer[];
   indexCount: number;
   triangleCount: number;
 }
@@ -86,6 +89,7 @@ export class Renderer {
   private uniforms: Record<string, WebGLUniformLocation | null> = {};
   private lineUniforms: Record<string, WebGLUniformLocation | null> = {};
   private highlightVAO: WebGLVertexArrayObject | null = null;
+  private highlightBuffers: WebGLBuffer[] = [];
   private highlightIndexCount = 0;
 
   projectionMatrix: Mat4 = new Float32Array(16);
@@ -96,6 +100,10 @@ export class Renderer {
   fogFar = 55;
   ambientStrength = 0.45;
   lightDir: [number, number, number] = [0.3, 0.8, 0.5];
+
+  // Stats
+  drawCalls = 0;
+  totalTriangles = 0;
 
   constructor(private canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', {
@@ -153,30 +161,27 @@ export class Renderer {
       uAmbient: gl.getUniformLocation(this.program, 'uAmbient'),
     };
 
-    // Line shader
+    // Line shader (with uOffset uniform for block highlight translation)
     const lvs = this.compileShader(gl.VERTEX_SHADER, LINE_VERT);
     const lfs = this.compileShader(gl.FRAGMENT_SHADER, LINE_FRAG);
     this.lineProgram = this.linkProgram(lvs, lfs);
     this.lineUniforms = {
       uProjection: gl.getUniformLocation(this.lineProgram, 'uProjection'),
       uView: gl.getUniformLocation(this.lineProgram, 'uView'),
+      uOffset: gl.getUniformLocation(this.lineProgram, 'uOffset'),
     };
   }
 
-  // Create wireframe cube for block highlight
   private initHighlight() {
     const gl = this.gl;
-    const e = 0.002; // slight expansion to avoid z-fighting
+    const e = 0.003;
     const v = [
       -e, -e, -e,  e, -e, -e,  e, 1+e, -e,  -e, 1+e, -e,
       -e, -e,  1+e,  e, -e,  1+e,  e, 1+e,  1+e,  -e, 1+e,  1+e,
     ];
     const idx = [
-      // bottom
       0,1, 1,2, 2,3, 3,0,
-      // top
       4,5, 5,6, 6,7, 7,4,
-      // sides
       0,4, 1,5, 2,6, 3,7,
     ];
 
@@ -188,10 +193,12 @@ export class Renderer {
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    this.highlightBuffers.push(buf);
 
     const ibuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.STATIC_DRAW);
+    this.highlightBuffers.push(ibuf);
 
     gl.bindVertexArray(null);
     this.highlightIndexCount = idx.length;
@@ -207,33 +214,48 @@ export class Renderer {
     const vao = gl.createVertexArray()!;
     gl.bindVertexArray(vao);
 
+    const buffers: WebGLBuffer[] = [];
+
     const posBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    buffers.push(posBuf);
 
     const normBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, normBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(1);
     gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+    buffers.push(normBuf);
 
     const colBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, colBuf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 0, 0);
+    buffers.push(colBuf);
 
     const idxBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+    // Use Uint32 for large meshes (WebGL 2 native support)
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(indices), gl.STATIC_DRAW);
+    buffers.push(idxBuf);
 
     gl.bindVertexArray(null);
-    return { vao, indexCount: indices.length, triangleCount: indices.length / 3 };
+    return { vao, buffers, indexCount: indices.length, triangleCount: indices.length / 3 };
   }
 
-  render(worldMesh: MeshData, modelMatrix: Mat4, time: number, highlightPos: { x: number; y: number; z: number } | null) {
+  deleteMesh(mesh: MeshData): void {
+    const gl = this.gl;
+    gl.deleteVertexArray(mesh.vao);
+    for (const buf of mesh.buffers) {
+      gl.deleteBuffer(buf);
+    }
+  }
+
+  beginFrame(): void {
     const gl = this.gl;
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
     gl.clearColor(this.fogColor[0], this.fogColor[1], this.fogColor[2], 1.0);
@@ -241,69 +263,61 @@ export class Renderer {
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.BACK);
+    this.drawCalls = 0;
+    this.totalTriangles = 0;
+  }
 
-    // --- Draw solid world ---
+  renderMesh(mesh: MeshData): void {
+    const gl = this.gl;
     gl.useProgram(this.program!);
+
+    // Set uniforms (identity model matrix for chunk meshes - positions are in world space)
+    const identity = this.identityMat;
     gl.uniformMatrix4fv(this.uniforms.uProjection, false, this.projectionMatrix);
     gl.uniformMatrix4fv(this.uniforms.uView, false, this.viewMatrix);
-    gl.uniformMatrix4fv(this.uniforms.uModel, false, modelMatrix);
-    gl.uniformMatrix3fv(this.uniforms.uNormalMatrix, false, new Float32Array([
-      modelMatrix[0], modelMatrix[1], modelMatrix[2],
-      modelMatrix[4], modelMatrix[5], modelMatrix[6],
-      modelMatrix[8], modelMatrix[9], modelMatrix[10],
-    ]));
+    gl.uniformMatrix4fv(this.uniforms.uModel, false, identity);
+    gl.uniformMatrix3fv(this.uniforms.uNormalMatrix, false, this.identityMat3);
     gl.uniform3fv(this.uniforms.uLightDir, this.lightDir);
     gl.uniform3fv(this.uniforms.uFogColor, this.fogColor);
     gl.uniform1f(this.uniforms.uFogNear, this.fogNear);
     gl.uniform1f(this.uniforms.uFogFar, this.fogFar);
     gl.uniform1f(this.uniforms.uAmbient, this.ambientStrength);
 
-    gl.bindVertexArray(worldMesh.vao);
-    gl.drawElements(gl.TRIANGLES, worldMesh.indexCount, gl.UNSIGNED_SHORT, 0);
+    gl.bindVertexArray(mesh.vao);
+    gl.drawElements(gl.TRIANGLES, mesh.indexCount, gl.UNSIGNED_INT, 0);
 
-    // --- Draw highlight wireframe ---
-    if (highlightPos && this.highlightVAO) {
-      gl.disable(gl.CULL_FACE);
-      gl.useProgram(this.lineProgram!);
-      gl.uniformMatrix4fv(this.lineUniforms.uProjection, false, this.projectionMatrix);
-      gl.uniformMatrix4fv(this.lineUniforms.uView, false, this.viewMatrix);
+    this.drawCalls++;
+    this.totalTriangles += mesh.triangleCount;
+  }
 
-      gl.bindVertexArray(this.highlightVAO);
-      const hx = highlightPos.x, hy = highlightPos.y, hz = highlightPos.z;
-      // Push model-view-projection manually with translation
-      gl.drawElements(gl.LINES, this.highlightIndexCount, gl.UNSIGNED_SHORT, 0);
+  renderHighlight(pos: { x: number; y: number; z: number }): void {
+    const gl = this.gl;
+    gl.disable(gl.CULL_FACE);
+    gl.useProgram(this.lineProgram!);
 
-      // We need to actually translate — simplest: use a uniform approach
-      // Since line shader has no model matrix, we bake translation into view matrix
-      // Actually let's just use a simpler approach: temporarily shift the vertices
-      // No — let's create a simple translation in the shader... but line shader has no model uniform.
-      // Simplest fix: push translate into viewMatrix temporarily
-      // Actually the cleanest: use the main program's model uniform
-      // Let me just re-draw using the main program for lines too... 
-      // OK simplest approach: I'll bake the translate into the view matrix temporarily
+    gl.uniformMatrix4fv(this.lineUniforms.uProjection, false, this.projectionMatrix);
+    gl.uniformMatrix4fv(this.lineUniforms.uView, false, this.viewMatrix);
+    gl.uniform3fv(this.lineUniforms.uOffset!, [pos.x, pos.y, pos.z]);
 
-      // Actually let me just translate the view and undo:
-      const view = this.viewMatrix;
-      // Bake highlight position into a temp matrix
-      gl.uniformMatrix4fv(this.lineUniforms.uView, false, this.translateView(view, hx, hy, hz));
-      gl.drawElements(gl.LINES, this.highlightIndexCount, gl.UNSIGNED_SHORT, 0);
-
-      gl.enable(gl.CULL_FACE);
-    }
+    gl.bindVertexArray(this.highlightVAO);
+    gl.drawElements(gl.LINES, this.highlightIndexCount, gl.UNSIGNED_SHORT, 0);
+    gl.enable(gl.CULL_FACE);
 
     gl.bindVertexArray(null);
   }
 
-  private translateView(view: Mat4, tx: number, ty: number, tz: number): Mat4 {
-    // Create a temporary view matrix that includes translation for the highlight block
-    const out = new Float32Array(view);
-    // Apply translation: out = view * translate(-tx, -ty, -tz)
-    // But simpler: just modify view to pre-translate
-    out[12] += view[0] * tx + view[4] * ty + view[8] * tz;
-    out[13] += view[1] * tx + view[5] * ty + view[9] * tz;
-    out[14] += view[2] * tx + view[6] * ty + view[10] * tz;
-    return out;
-  }
+  private identityMat = new Float32Array([
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ]);
+
+  private identityMat3 = new Float32Array([
+    1, 0, 0,
+    0, 1, 0,
+    0, 0, 1,
+  ]);
 
   resizeWithScale(width: number, height: number, scale: number) {
     const s = Math.max(0.25, Math.min(1, scale));
@@ -317,6 +331,10 @@ export class Renderer {
     const gl = this.gl;
     if (this.program) gl.deleteProgram(this.program);
     if (this.lineProgram) gl.deleteProgram(this.lineProgram);
+    if (this.highlightVAO) {
+      gl.deleteVertexArray(this.highlightVAO);
+      for (const buf of this.highlightBuffers) gl.deleteBuffer(buf);
+    }
     const ext = gl.getExtension('WEBGL_lose_context');
     if (ext) ext.loseContext();
   }

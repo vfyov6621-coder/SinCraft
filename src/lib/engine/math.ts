@@ -1,6 +1,7 @@
 // ==========================================
 // Lightweight 3D Engine - Math Library
 // Optimized for weak PCs - no external deps
+// Includes frustum culling for chunk rendering
 // ==========================================
 
 export type Vec3 = [number, number, number];
@@ -148,4 +149,72 @@ export function mat4Transpose(m: Mat4): Mat4 {
     m[2], m[6], m[10], m[14],
     m[3], m[7], m[11], m[15],
   ]);
+}
+
+// ==========================================
+// Frustum Culling
+// Extract 6 clip planes from VP matrix
+// ==========================================
+
+/**
+ * Extract 6 frustum planes from view-projection matrix.
+ * Matrix is in column-major order (WebGL convention).
+ * Returns Float32Array with 24 floats (6 planes x 4 components).
+ * Each plane: [a, b, c, d] where ax + by + cz + d >= 0 means inside.
+ */
+export function extractFrustumPlanes(vp: Mat4): Float32Array {
+  const planes = new Float32Array(24);
+
+  // Column-major: m[col*4 + row]
+  // Row 0: m[0], m[4], m[8], m[12]
+  // Row 1: m[1], m[5], m[9], m[13]
+  // Row 2: m[2], m[6], m[10], m[14]
+  // Row 3: m[3], m[7], m[11], m[15]
+
+  // Left: row3 + row0
+  planes[0] = vp[3] + vp[0]; planes[1] = vp[7] + vp[4];
+  planes[2] = vp[11] + vp[8]; planes[3] = vp[15] + vp[12];
+  // Right: row3 - row0
+  planes[4] = vp[3] - vp[0]; planes[5] = vp[7] - vp[4];
+  planes[6] = vp[11] - vp[8]; planes[7] = vp[15] - vp[12];
+  // Bottom: row3 + row1
+  planes[8] = vp[3] + vp[1]; planes[9] = vp[7] + vp[5];
+  planes[10] = vp[11] + vp[9]; planes[11] = vp[15] + vp[13];
+  // Top: row3 - row1
+  planes[12] = vp[3] - vp[1]; planes[13] = vp[7] - vp[5];
+  planes[14] = vp[11] - vp[9]; planes[15] = vp[15] - vp[13];
+  // Near: row3 + row2
+  planes[16] = vp[3] + vp[2]; planes[17] = vp[7] + vp[6];
+  planes[18] = vp[11] + vp[10]; planes[19] = vp[15] + vp[14];
+  // Far: row3 - row2
+  planes[20] = vp[3] - vp[2]; planes[21] = vp[7] - vp[6];
+  planes[22] = vp[11] - vp[10]; planes[23] = vp[15] - vp[14];
+
+  return planes;
+}
+
+/**
+ * Test AABB against frustum planes.
+ * Returns true if AABB is potentially visible (not fully outside any plane).
+ * cx,cy,cz = center of AABB
+ * hx,hy,hz = half-extents of AABB
+ */
+export function isAABBVisible(
+  cx: number, cy: number, cz: number,
+  hx: number, hy: number, hz: number,
+  planes: Float32Array,
+): boolean {
+  for (let i = 0; i < 6; i++) {
+    const base = i * 4;
+    const a = planes[base];
+    const b = planes[base + 1];
+    const c = planes[base + 2];
+    const d = planes[base + 3];
+    // Pick the corner of AABB most negative along the plane normal
+    const px = (a > 0) ? cx + hx : cx - hx;
+    const py = (b > 0) ? cy + hy : cy - hy;
+    const pz = (c > 0) ? cz + hz : cz - hz;
+    if (a * px + b * py + c * pz + d < 0) return false;
+  }
+  return true;
 }

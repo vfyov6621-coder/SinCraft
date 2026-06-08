@@ -1,8 +1,9 @@
 // ==========================================
 // Player Physics - gravity, jumping, AABB collision
+// Supports dynamic world bounds
 // ==========================================
 
-import { VoxelWorld, WORLD_W, WORLD_D } from './world';
+import { VoxelWorld } from './world';
 
 export class PlayerPhysics {
   x = 16; y = 20; z = 16;
@@ -52,10 +53,16 @@ export class PlayerPhysics {
     this.y += this.vy * dt;
     if (this.collides(world)) { this.y -= this.vy * dt; if (this.vy < 0) this.onGround = true; this.vy = 0; }
 
-    const w = 0.01;
-    this.x = Math.max(w, Math.min(WORLD_W - w, this.x));
-    this.z = Math.max(w, Math.min(WORLD_D - w, this.z));
-    if (this.y < 0) { this.y = 20; this.vy = 0; }
+    // Clamp to world bounds (dynamic based on world size)
+    const w = this.width + 0.01;
+    this.x = Math.max(w, Math.min(world.worldWidth - w, this.x));
+    this.z = Math.max(w, Math.min(world.worldDepth - w, this.z));
+    if (this.y < -10) {
+      // Fell below world - respawn at center
+      const spawn = world.findSpawnPoint();
+      this.x = spawn.x; this.y = spawn.y; this.z = spawn.z;
+      this.vy = 0;
+    }
   }
 
   getForward(): [number, number, number] {
@@ -63,7 +70,7 @@ export class PlayerPhysics {
   }
 
   getRight(): [number, number, number] {
-    return [-Math.cos(this.yaw), 0, -Math.sin(this.yaw)];
+    return [Math.cos(this.yaw), 0, Math.sin(this.yaw)];
   }
 
   getLookDir(): [number, number, number] {

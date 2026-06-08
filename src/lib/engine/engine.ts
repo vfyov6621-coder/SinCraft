@@ -1,19 +1,31 @@
 // ==========================================
-// LiteCraft Engine - Game loop with pause, save, network
+// LiteCraft Engine - Chunk-based game loop
+// Render distance, frustum culling, pause, save, network
 // ==========================================
 
 import { Renderer, MeshData } from './renderer';
-import { VoxelWorld, WORLD_W, WORLD_H, WORLD_D } from './world';
+import { VoxelWorld, WorldSettings } from './world';
 import { PlayerPhysics } from './physics';
 import { raycast, RayHit } from './raycast';
-import { Mat4, mat4Perspective, mat4LookAt, mat4Identity } from './math';
+import { Mat4, mat4Perspective, mat4LookAt, mat4Identity, mat4Multiply, extractFrustumPlanes, isAABBVisible } from './math';
 import { BlockType, HOTBAR_BLOCKS } from './blocks';
+import { CHUNK_SIZE } from './chunk';
 import { GameNetwork, RemotePlayer } from './network';
 
 export interface GameCallbacks {
-  onStatsUpdate: (stats: { fps: number; triangles: number; res: string }) => void;
+  onStatsUpdate: (stats: GameStats) => void;
   onPause: () => void;
   onRemotePlayersUpdate: (players: RemotePlayer[]) => void;
+  onSlotChange: (slot: number) => void;
+}
+
+export interface GameStats {
+  fps: number;
+  triangles: number;
+  drawCalls: number;
+  chunksVisible: number;
+  chunksTotal: number;
+  res: string;
 }
 
 export class Game {
@@ -22,7 +34,9 @@ export class Game {
   player!: PlayerPhysics;
   network: GameNetwork | null = null;
 
-  private worldMesh: MeshData | null = null;
+  // Chunk mesh storage
+  private chunkMeshes: Map<string, MeshData> = new Map();
+
   private animFrame = 0;
   private lastTime = 0;
   private fpsFrames = 0;
@@ -31,29 +45,37 @@ export class Game {
   private running = false;
   private paused = false;
   private resolutionScale = 0.75;
-  private meshDirty = true;
+
+  // Render settings
+  renderDistance = 8; // chunks
 
   selectedSlot = 0;
   targetBlock: RayHit | null = null;
   callbacks: GameCallbacks;
 
-  constructor(private canvas: HTMLCanvasElement, private config: { resolutionScale?: number }) {
+  get settings(): WorldSettings { return this.world.settings; }
+
+  constructor(private canvas: HTMLCanvasElement, private config: { resolutionScale?: number; renderDistance?: number }) {
     this.resolutionScale = config.resolutionScale ?? 0.75;
+    this.renderDistance = config.renderDistance ?? 8;
     this.callbacks = {
       onStatsUpdate: () => {},
       onPause: () => {},
       onRemotePlayersUpdate: () => {},
+      onSlotChange: () => {},
     };
   }
 
-  init(seed?: number, savedBlocks?: string, savedPlayer?: { x: number; y: number; z: number; yaw: number }) {
+  init(settings: WorldSettings, savedChunks?: Map<string, string>, savedPlayer?: { x: number; y: number; z: number; yaw: number }) {
     this.renderer = new Renderer(this.canvas);
-    this.world = new VoxelWorld(seed);
-    if (savedBlocks) {
-      this.world.deserialize(savedBlocks);
-    } else {
-      this.world.generate(seed);
+    this.world = new VoxelWorld(settings);
+
+    // Generate or load terrain
+    this.world.generateAll();
+    if (savedChunks) {
+      this.world.deserializeChunks(savedChunks);
     }
+
     this.player = new PlayerPhysics();
 
     if (savedPlayer) {
@@ -62,20 +84,28 @@ export class Game {
       this.player.z = savedPlayer.z;
       this.player.yaw = savedPlayer.yaw || 0;
     } else {
-      const sx = Math.floor(WORLD_W / 2);
-      const sz = Math.floor(WORLD_D / 2);
-      for (let y = WORLD_H - 1; y >= 0; y--) {
-        if (this.world.isSolid(sx, y, sz)) {
-          this.player.x = sx + 0.5; this.player.y = y + 1; this.player.z = sz + 0.5; break;
-        }
-      }
+      const spawn = this.world.findSpawnPoint();
+      this.player.x = spawn.x;
+      this.player.y = spawn.y;
+      this.player.z = spawn.z;
     }
 
-    this.rebuildMesh();
+    // Build initial chunk meshes
+    this.rebuildAllChunkMeshes();
+
+    // Set fog based on render distance
+    this.updateFog();
+
     this.handleResize();
     this.setupInput();
     window.addEventListener('resize', this.handleResize);
     this.start();
+  }
+
+  private updateFog(): void {
+    const fogFar = this.renderDistance * CHUNK_SIZE;
+    this.renderer.fogFar = fogFar;
+    this.renderer.fogNear = fogFar * 0.4;
   }
 
   private handleResize = () => {
@@ -84,13 +114,51 @@ export class Game {
   };
 
   setResolutionScale(s: number) { this.resolutionScale = s; this.handleResize(); }
+  setRenderDistance(d: number) { this.renderDistance = Math.max(2, Math.min(32, d)); this.updateFog(); }
 
   get selectedBlockType(): BlockType { return HOTBAR_BLOCKS[this.selectedSlot] ?? BlockType.Stone; }
+
+  // --- Chunk Mesh Management ---
+
+  private rebuildAllChunkMeshes(): void {
+    // Delete all existing meshes
+    for (const mesh of this.chunkMeshes.values()) {
+      this.renderer.deleteMesh(mesh);
+    }
+    this.chunkMeshes.clear();
+
+    // Build meshes for all non-empty chunks
+    for (const [key, chunk] of this.world.chunks) {
+      if (chunk.isEmpty()) continue;
+      const data = this.world.buildChunkMesh(chunk.cx, chunk.cz);
+      if (data) {
+        this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices));
+      }
+    }
+  }
+
+  private rebuildDirtyChunks(): void {
+    const dirtyChunks = this.world.getAndClearDirtyChunks();
+    for (const chunk of dirtyChunks) {
+      const key = `${chunk.cx},${chunk.cz}`;
+      // Delete old mesh
+      const oldMesh = this.chunkMeshes.get(key);
+      if (oldMesh) {
+        this.renderer.deleteMesh(oldMesh);
+        this.chunkMeshes.delete(key);
+      }
+      // Build new mesh
+      const data = this.world.buildChunkMesh(chunk.cx, chunk.cz);
+      if (data) {
+        this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices));
+      }
+    }
+  }
 
   // --- Save data ---
   getSaveData() {
     return {
-      blocks: this.world.serialize(),
+      blocks: this.world.serializeChunks(),
       playerX: this.player.x, playerY: this.player.y, playerZ: this.player.z,
       playerYaw: this.player.yaw,
     };
@@ -100,12 +168,12 @@ export class Game {
   startNetwork(playerId: string, playerName: string, playerColor: string, port?: number) {
     this.network = new GameNetwork(playerId, playerName, playerColor, {
       onWorldData: (data, w, h, d) => {
-        this.world.deserialize(data);
-        this.meshDirty = true;
+        this.world.deserializeChunks(new Map(Object.entries(data)));
+        this.rebuildDirtyChunks();
       },
       onBlockSet: (x, y, z, type) => {
         this.world.setBlock(x, y, z, type as BlockType);
-        this.meshDirty = true;
+        this.rebuildDirtyChunks();
       },
       onPlayerJoin: () => {},
       onPlayerLeave: () => {},
@@ -118,10 +186,12 @@ export class Game {
 
   hostNetwork(playerId: string, playerName: string, playerColor: string, port?: number) {
     this.startNetwork(playerId, playerName, playerColor, port);
-    // Send world data after a short delay to ensure connection
     setTimeout(() => {
       if (this.network?.isConnected) {
-        this.network.sendWorld(this.world.serialize(), WORLD_W, WORLD_H, WORLD_D);
+        const chunks = this.world.serializeChunks();
+        const obj: Record<string, string> = {};
+        chunks.forEach((v, k) => obj[k] = v);
+        this.network.sendWorld(obj, this.world.worldWidth, this.world.worldHeight, this.world.worldDepth);
       }
     }, 500);
   }
@@ -135,7 +205,7 @@ export class Game {
     if (!this.targetBlock) return;
     const { x, y, z } = this.targetBlock;
     this.world.setBlock(x, y, z, BlockType.Air);
-    this.meshDirty = true;
+    this.rebuildDirtyChunks();
     if (this.network?.isConnected) this.network.sendBlock(x, y, z, 0);
   }
 
@@ -151,14 +221,8 @@ export class Game {
         p.z + hw > placeZ && p.z - hw < placeZ + 1) return;
 
     this.world.setBlock(placeX, placeY, placeZ, this.selectedBlockType);
-    this.meshDirty = true;
+    this.rebuildDirtyChunks();
     if (this.network?.isConnected) this.network.sendBlock(placeX, placeY, placeZ, this.selectedBlockType);
-  }
-
-  private rebuildMesh() {
-    const data = this.world.buildMesh();
-    this.worldMesh = this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices);
-    this.meshDirty = false;
   }
 
   // --- Input ---
@@ -168,10 +232,12 @@ export class Game {
     document.addEventListener('mousemove', this.onMouseMove);
     document.addEventListener('mousedown', this.onMouseDown);
     document.addEventListener('wheel', this.onWheel);
-    document.addEventListener('pointerlockchange', () => {});
-    this.canvas.addEventListener('click', () => { if (!this.paused) this.canvas.requestPointerLock(); });
-    this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    this.canvas.addEventListener('click', this.onCanvasClick);
+    this.canvas.addEventListener('contextmenu', this.onCanvasContextMenu);
   }
+
+  private onCanvasClick = () => { if (!this.paused) this.canvas.requestPointerLock(); };
+  private onCanvasContextMenu = (e: Event) => e.preventDefault();
 
   private onKeyDown = (e: KeyboardEvent) => {
     if (this.paused) return;
@@ -183,7 +249,8 @@ export class Game {
       case 'Space': this.player.wantJump = true; e.preventDefault(); break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
-        this.selectedSlot = parseInt(e.code.charAt(5)) - 1; break;
+        this.selectedSlot = parseInt(e.code.charAt(5)) - 1;
+        this.callbacks.onSlotChange(this.selectedSlot); break;
     }
   };
 
@@ -215,6 +282,7 @@ export class Game {
     if (this.paused) return;
     if (e.deltaY > 0) this.selectedSlot = (this.selectedSlot + 1) % HOTBAR_BLOCKS.length;
     else this.selectedSlot = (this.selectedSlot - 1 + HOTBAR_BLOCKS.length) % HOTBAR_BLOCKS.length;
+    this.callbacks.onSlotChange(this.selectedSlot);
   };
 
   private detachInput() {
@@ -223,6 +291,8 @@ export class Game {
     document.removeEventListener('mousemove', this.onMouseMove);
     document.removeEventListener('mousedown', this.onMouseDown);
     document.removeEventListener('wheel', this.onWheel);
+    this.canvas.removeEventListener('click', this.onCanvasClick);
+    this.canvas.removeEventListener('contextmenu', this.onCanvasContextMenu);
   }
 
   togglePause() {
@@ -254,7 +324,8 @@ export class Game {
     this.fpsFrames++; this.fpsTime += dt;
     if (this.fpsTime >= 0.5) { this.currentFps = Math.round(this.fpsFrames / this.fpsTime); this.fpsFrames = 0; this.fpsTime = 0; }
 
-    if (this.meshDirty) this.rebuildMesh();
+    // Rebuild dirty chunk meshes
+    this.rebuildDirtyChunks();
 
     if (!this.paused) {
       this.player.update(dt, this.world);
@@ -263,15 +334,15 @@ export class Game {
       const dir = this.player.getLookDir();
       this.targetBlock = raycast(this.world, eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], 7);
 
-      // Network position sync
       if (this.network?.isConnected) {
         this.network.sendPosition(this.player.x, this.player.y, this.player.z, this.player.yaw, this.player.pitch);
       }
     }
 
-    // Always render (even when paused)
+    // --- Render ---
     const aspect = this.canvas.width / this.canvas.height;
-    const proj = mat4Perspective(Math.PI / 3, aspect, 0.05, 80);
+    const fogFar = this.renderDistance * CHUNK_SIZE + 20;
+    const proj = mat4Perspective(Math.PI / 3, aspect, 0.05, fogFar);
     const eyePos: [number, number, number] = [this.player.x, this.player.y + this.player.eyeHeight, this.player.z];
     const fwd: [number, number, number] = this.player.getLookDir();
     const target: [number, number, number] = [eyePos[0] + fwd[0], eyePos[1] + fwd[1], eyePos[2] + fwd[2]];
@@ -279,15 +350,54 @@ export class Game {
     this.renderer.projectionMatrix = proj;
     this.renderer.viewMatrix = view;
 
-    if (this.worldMesh) {
-      this.renderer.render(this.worldMesh, mat4Identity(), 0, this.targetBlock ? {
-        x: this.targetBlock.x, y: this.targetBlock.y, z: this.targetBlock.z,
-      } : null);
+    // Compute frustum planes for culling
+    const vp = mat4Multiply(proj, view);
+    const frustum = extractFrustumPlanes(vp);
+
+    // Begin rendering
+    this.renderer.beginFrame();
+
+    // Render visible chunks
+    let chunksVisible = 0;
+    const playerCX = (this.player.x / CHUNK_SIZE) | 0;
+    const playerCZ = (this.player.z / CHUNK_SIZE) | 0;
+    const rd = this.renderDistance;
+    const halfH = this.world.worldHeight / 2;
+
+    for (const [key, mesh] of this.chunkMeshes) {
+      const parts = key.split(',');
+      const cx = parseInt(parts[0]);
+      const cz = parseInt(parts[1]);
+
+      // Distance check (circular, not square)
+      const dx = cx - playerCX;
+      const dz = cz - playerCZ;
+      if (dx * dx + dz * dz > rd * rd) continue;
+
+      // Frustum culling
+      const chunkCenterX = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+      const chunkCenterZ = cz * CHUNK_SIZE + CHUNK_SIZE / 2;
+      const halfSize = CHUNK_SIZE / 2;
+      if (!isAABBVisible(chunkCenterX, halfH, chunkCenterZ, halfSize, halfH, halfSize, frustum)) continue;
+
+      this.renderer.renderMesh(mesh);
+      chunksVisible++;
     }
 
+    // Draw block highlight
+    if (this.targetBlock) {
+      this.renderer.renderHighlight({
+        x: this.targetBlock.x, y: this.targetBlock.y, z: this.targetBlock.z,
+      });
+    }
+
+    // Update stats
     this.callbacks.onStatsUpdate({
       fps: this.currentFps,
-      triangles: this.worldMesh?.triangleCount ?? 0,
+      triangles: this.renderer.totalTriangles,
+      drawCalls: this.renderer.drawCalls,
+      chunksVisible,
+      chunksTotal: this.world.chunks.size,
       res: `${this.canvas.width}x${this.canvas.height}`,
     });
     if (this.network) this.callbacks.onRemotePlayersUpdate(Array.from(this.network.remotePlayers.values()));
@@ -297,6 +407,11 @@ export class Game {
     this.stop();
     this.stopNetwork();
     window.removeEventListener('resize', this.handleResize);
+    // Delete all chunk meshes
+    for (const mesh of this.chunkMeshes.values()) {
+      this.renderer.deleteMesh(mesh);
+    }
+    this.chunkMeshes.clear();
     this.renderer.destroy();
   }
 }
