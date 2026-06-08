@@ -41,6 +41,7 @@ const FRAGMENT_SHADER = `
   uniform float uFogNear;
   uniform float uFogFar;
   uniform float uAmbient;
+  uniform vec3 uCameraPos;
 
   void main() {
     float diff = max(dot(vNormal, normalize(uLightDir)), 0.0);
@@ -48,8 +49,8 @@ const FRAGMENT_SHADER = `
 
     vec3 color = vColor * light;
 
-    // Distance fog
-    float depth = length(vWorldPos);
+    // Distance fog - from camera, not origin!
+    float depth = distance(vWorldPos, uCameraPos);
     float fogFactor = clamp((uFogFar - depth) / (uFogFar - uFogNear), 0.0, 1.0);
     color = mix(uFogColor, color, fogFactor);
 
@@ -159,6 +160,7 @@ export class Renderer {
       uFogNear: gl.getUniformLocation(this.program, 'uFogNear'),
       uFogFar: gl.getUniformLocation(this.program, 'uFogFar'),
       uAmbient: gl.getUniformLocation(this.program, 'uAmbient'),
+      uCameraPos: gl.getUniformLocation(this.program, 'uCameraPos'),
     };
 
     // Line shader (with uOffset uniform for block highlight translation)
@@ -255,6 +257,8 @@ export class Renderer {
     }
   }
 
+  cameraPos: [number, number, number] = [0, 0, 0];
+
   beginFrame(): void {
     const gl = this.gl;
     gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
@@ -282,6 +286,7 @@ export class Renderer {
     gl.uniform1f(this.uniforms.uFogNear, this.fogNear);
     gl.uniform1f(this.uniforms.uFogFar, this.fogFar);
     gl.uniform1f(this.uniforms.uAmbient, this.ambientStrength);
+    gl.uniform3fv(this.uniforms.uCameraPos, this.cameraPos);
 
     gl.bindVertexArray(mesh.vao);
     gl.drawElements(gl.TRIANGLES, mesh.indexCount, gl.UNSIGNED_INT, 0);

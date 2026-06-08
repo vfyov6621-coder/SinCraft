@@ -225,11 +225,11 @@ export class VoxelWorld {
         return Math.max(0, Math.min(H - 6, Math.floor(h)));
       }
       default: { // normal
-        let h = H * 0.12;
-        h += Math.sin(nx * Math.PI * 4 + seed * 0.1) * H * 0.04;
-        h += Math.cos(nz * Math.PI * 3 + seed * 0.2) * H * 0.04;
-        h += Math.sin((nx + nz) * Math.PI * 6 + seed * 0.3) * H * 0.03;
-        h += Math.sin(nx * Math.PI * 10 + nz * Math.PI * 8 + seed * 0.5) * H * 0.01;
+        let h = H * 0.2;
+        h += Math.sin(nx * Math.PI * 3 + seed * 0.1) * H * 0.08;
+        h += Math.cos(nz * Math.PI * 2.5 + seed * 0.2) * H * 0.07;
+        h += Math.sin((nx + nz) * Math.PI * 5 + seed * 0.3) * H * 0.05;
+        h += Math.sin(nx * Math.PI * 9 + nz * Math.PI * 7 + seed * 0.5) * H * 0.02;
         return Math.max(1, Math.min(H - 6, Math.floor(h)));
       }
     }

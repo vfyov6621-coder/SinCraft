@@ -340,7 +340,7 @@ export class Game {
     }
 
     // --- Render ---
-    const aspect = this.canvas.width / this.canvas.height;
+    const aspect = this.canvas.width / Math.max(1, this.canvas.height);
     const fogFar = this.renderDistance * CHUNK_SIZE + 20;
     const proj = mat4Perspective(Math.PI / 3, aspect, 0.05, fogFar);
     const eyePos: [number, number, number] = [this.player.x, this.player.y + this.player.eyeHeight, this.player.z];
@@ -349,6 +349,7 @@ export class Game {
     const view = mat4LookAt(eyePos, target, [0, 1, 0]);
     this.renderer.projectionMatrix = proj;
     this.renderer.viewMatrix = view;
+    this.renderer.cameraPos = eyePos;
 
     // Compute frustum planes for culling
     const vp = mat4Multiply(proj, view);
