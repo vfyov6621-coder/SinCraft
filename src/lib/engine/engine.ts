@@ -1,6 +1,5 @@
 // ==========================================
-// LiteCraft Engine - Minecraft on minimals
-// Orchestrates world, physics, rendering
+// LiteCraft Engine - Game loop with pause, save, network
 // ==========================================
 
 import { Renderer, MeshData } from './renderer';
@@ -9,17 +8,19 @@ import { PlayerPhysics } from './physics';
 import { raycast, RayHit } from './raycast';
 import { Mat4, mat4Perspective, mat4LookAt, mat4Identity } from './math';
 import { BlockType, HOTBAR_BLOCKS } from './blocks';
+import { GameNetwork, RemotePlayer } from './network';
 
 export interface GameCallbacks {
-  onStatsUpdate: (stats: { fps: number; drawCalls: number; triangles: number; res: string }) => void;
-  onHitUpdate: (hit: RayHit | null) => void;
-  onPositionUpdate: (pos: { x: number; y: number; z: number }) => void;
+  onStatsUpdate: (stats: { fps: number; triangles: number; res: string }) => void;
+  onPause: () => void;
+  onRemotePlayersUpdate: (players: RemotePlayer[]) => void;
 }
 
 export class Game {
   renderer!: Renderer;
   world!: VoxelWorld;
   player!: PlayerPhysics;
+  network: GameNetwork | null = null;
 
   private worldMesh: MeshData | null = null;
   private animFrame = 0;
@@ -28,6 +29,7 @@ export class Game {
   private fpsTime = 0;
   private currentFps = 0;
   private running = false;
+  private paused = false;
   private resolutionScale = 0.75;
   private meshDirty = true;
 
@@ -39,52 +41,93 @@ export class Game {
     this.resolutionScale = config.resolutionScale ?? 0.75;
     this.callbacks = {
       onStatsUpdate: () => {},
-      onHitUpdate: () => {},
-      onPositionUpdate: () => {},
+      onPause: () => {},
+      onRemotePlayersUpdate: () => {},
     };
   }
 
-  init() {
-    const { canvas } = this;
-    this.renderer = new Renderer(canvas);
-    this.world = new VoxelWorld();
-    this.world.generate();
+  init(seed?: number, savedBlocks?: string, savedPlayer?: { x: number; y: number; z: number; yaw: number }) {
+    this.renderer = new Renderer(this.canvas);
+    this.world = new VoxelWorld(seed);
+    if (savedBlocks) {
+      this.world.deserialize(savedBlocks);
+    } else {
+      this.world.generate(seed);
+    }
     this.player = new PlayerPhysics();
 
-    // Find spawn position
-    const sx = Math.floor(WORLD_W / 2);
-    const sz = Math.floor(WORLD_D / 2);
-    for (let y = WORLD_H - 1; y >= 0; y--) {
-      if (this.world.isSolid(sx, y, sz)) {
-        this.player.x = sx + 0.5;
-        this.player.y = y + 1;
-        this.player.z = sz + 0.5;
-        break;
+    if (savedPlayer) {
+      this.player.x = savedPlayer.x;
+      this.player.y = savedPlayer.y;
+      this.player.z = savedPlayer.z;
+      this.player.yaw = savedPlayer.yaw || 0;
+    } else {
+      const sx = Math.floor(WORLD_W / 2);
+      const sz = Math.floor(WORLD_D / 2);
+      for (let y = WORLD_H - 1; y >= 0; y--) {
+        if (this.world.isSolid(sx, y, sz)) {
+          this.player.x = sx + 0.5; this.player.y = y + 1; this.player.z = sz + 0.5; break;
+        }
       }
     }
 
     this.rebuildMesh();
     this.handleResize();
     this.setupInput();
-
     window.addEventListener('resize', this.handleResize);
     this.start();
   }
 
   private handleResize = () => {
     const parent = this.canvas.parentElement;
-    if (parent) {
-      this.renderer.resizeWithScale(parent.clientWidth, parent.clientHeight, this.resolutionScale);
-    }
+    if (parent) this.renderer.resizeWithScale(parent.clientWidth, parent.clientHeight, this.resolutionScale);
   };
 
-  setResolutionScale(s: number) {
-    this.resolutionScale = s;
-    this.handleResize();
+  setResolutionScale(s: number) { this.resolutionScale = s; this.handleResize(); }
+
+  get selectedBlockType(): BlockType { return HOTBAR_BLOCKS[this.selectedSlot] ?? BlockType.Stone; }
+
+  // --- Save data ---
+  getSaveData() {
+    return {
+      blocks: this.world.serialize(),
+      playerX: this.player.x, playerY: this.player.y, playerZ: this.player.z,
+      playerYaw: this.player.yaw,
+    };
   }
 
-  get selectedBlockType(): BlockType {
-    return HOTBAR_BLOCKS[this.selectedSlot] ?? BlockType.Stone;
+  // --- Network ---
+  startNetwork(playerId: string, playerName: string, playerColor: string, port?: number) {
+    this.network = new GameNetwork(playerId, playerName, playerColor, {
+      onWorldData: (data, w, h, d) => {
+        this.world.deserialize(data);
+        this.meshDirty = true;
+      },
+      onBlockSet: (x, y, z, type) => {
+        this.world.setBlock(x, y, z, type as BlockType);
+        this.meshDirty = true;
+      },
+      onPlayerJoin: () => {},
+      onPlayerLeave: () => {},
+      onPlayerPos: () => {},
+      onPlayersList: () => {},
+      onChat: () => {},
+    });
+    this.network.connect(port);
+  }
+
+  hostNetwork(playerId: string, playerName: string, playerColor: string, port?: number) {
+    this.startNetwork(playerId, playerName, playerColor, port);
+    // Send world data after a short delay to ensure connection
+    setTimeout(() => {
+      if (this.network?.isConnected) {
+        this.network.sendWorld(this.world.serialize(), WORLD_W, WORLD_H, WORLD_D);
+      }
+    }, 500);
+  }
+
+  stopNetwork() {
+    if (this.network) { this.network.disconnect(); this.network = null; }
   }
 
   // --- Block interaction ---
@@ -93,6 +136,7 @@ export class Game {
     const { x, y, z } = this.targetBlock;
     this.world.setBlock(x, y, z, BlockType.Air);
     this.meshDirty = true;
+    if (this.network?.isConnected) this.network.sendBlock(x, y, z, 0);
   }
 
   placeBlock() {
@@ -101,18 +145,14 @@ export class Game {
     if (!this.world.inBounds(placeX, placeY, placeZ)) return;
     if (this.world.isSolid(placeX, placeY, placeZ)) return;
 
-    // Don't place inside player
-    const p = this.player;
-    const hw = p.width;
-    const h = p.height;
-    const playerOverlaps =
-      p.x + hw > placeX && p.x - hw < placeX + 1 &&
-      p.y + h > placeY && p.y < placeY + 1 &&
-      p.z + hw > placeZ && p.z - hw < placeZ + 1;
-    if (playerOverlaps) return;
+    const p = this.player; const hw = p.width; const h = p.height;
+    if (p.x + hw > placeX && p.x - hw < placeX + 1 &&
+        p.y + h > placeY && p.y < placeY + 1 &&
+        p.z + hw > placeZ && p.z - hw < placeZ + 1) return;
 
     this.world.setBlock(placeX, placeY, placeZ, this.selectedBlockType);
     this.meshDirty = true;
+    if (this.network?.isConnected) this.network.sendBlock(placeX, placeY, placeZ, this.selectedBlockType);
   }
 
   private rebuildMesh() {
@@ -129,12 +169,12 @@ export class Game {
     document.addEventListener('mousedown', this.onMouseDown);
     document.addEventListener('wheel', this.onWheel);
     document.addEventListener('pointerlockchange', () => {});
-    this.canvas.addEventListener('click', () => {
-      this.canvas.requestPointerLock();
-    });
+    this.canvas.addEventListener('click', () => { if (!this.paused) this.canvas.requestPointerLock(); });
+    this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   }
 
   private onKeyDown = (e: KeyboardEvent) => {
+    if (this.paused) return;
     switch (e.code) {
       case 'KeyW': case 'ArrowUp': this.player.moveForward = true; break;
       case 'KeyS': case 'ArrowDown': this.player.moveBackward = true; break;
@@ -143,8 +183,7 @@ export class Game {
       case 'Space': this.player.wantJump = true; e.preventDefault(); break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
-        this.selectedSlot = parseInt(e.code.charAt(5)) - 1;
-        break;
+        this.selectedSlot = parseInt(e.code.charAt(5)) - 1; break;
     }
   };
 
@@ -159,25 +198,23 @@ export class Game {
   };
 
   private onMouseMove = (e: MouseEvent) => {
-    if (document.pointerLockElement !== this.canvas) return;
-    this.player.yaw -= e.movementX * 0.002;
+    if (document.pointerLockElement !== this.canvas || this.paused) return;
+    this.player.yaw += e.movementX * 0.002;
     this.player.pitch -= e.movementY * 0.002;
     this.player.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, this.player.pitch));
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (document.pointerLockElement !== this.canvas) return;
-    if (e.button === 0) this.removeBlock();  // left click = break
-    if (e.button === 2) this.placeBlock();   // right click = place
+    if (document.pointerLockElement !== this.canvas || this.paused) return;
+    if (e.button === 0) this.removeBlock();
+    if (e.button === 2) this.placeBlock();
   };
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
-    if (e.deltaY > 0) {
-      this.selectedSlot = (this.selectedSlot + 1) % HOTBAR_BLOCKS.length;
-    } else {
-      this.selectedSlot = (this.selectedSlot - 1 + HOTBAR_BLOCKS.length) % HOTBAR_BLOCKS.length;
-    }
+    if (this.paused) return;
+    if (e.deltaY > 0) this.selectedSlot = (this.selectedSlot + 1) % HOTBAR_BLOCKS.length;
+    else this.selectedSlot = (this.selectedSlot - 1 + HOTBAR_BLOCKS.length) % HOTBAR_BLOCKS.length;
   };
 
   private detachInput() {
@@ -188,17 +225,22 @@ export class Game {
     document.removeEventListener('wheel', this.onWheel);
   }
 
+  togglePause() {
+    this.paused = !this.paused;
+    if (this.paused) {
+      document.exitPointerLock();
+      this.callbacks.onPause();
+    }
+  }
+
   // --- Game loop ---
   start() {
-    this.running = true;
-    this.lastTime = performance.now();
+    this.running = true; this.lastTime = performance.now();
     this.loop();
   }
 
   stop() {
-    this.running = false;
-    cancelAnimationFrame(this.animFrame);
-    this.detachInput();
+    this.running = false; cancelAnimationFrame(this.animFrame); this.detachInput();
   }
 
   private loop = () => {
@@ -209,61 +251,51 @@ export class Game {
     const dt = Math.min((now - this.lastTime) / 1000, 0.1);
     this.lastTime = now;
 
-    // FPS
-    this.fpsFrames++;
-    this.fpsTime += dt;
-    if (this.fpsTime >= 0.5) {
-      this.currentFps = Math.round(this.fpsFrames / this.fpsTime);
-      this.fpsFrames = 0;
-      this.fpsTime = 0;
+    this.fpsFrames++; this.fpsTime += dt;
+    if (this.fpsTime >= 0.5) { this.currentFps = Math.round(this.fpsFrames / this.fpsTime); this.fpsFrames = 0; this.fpsTime = 0; }
+
+    if (this.meshDirty) this.rebuildMesh();
+
+    if (!this.paused) {
+      this.player.update(dt, this.world);
+
+      const eye = this.player.getEyePos();
+      const dir = this.player.getLookDir();
+      this.targetBlock = raycast(this.world, eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], 7);
+
+      // Network position sync
+      if (this.network?.isConnected) {
+        this.network.sendPosition(this.player.x, this.player.y, this.player.z, this.player.yaw, this.player.pitch);
+      }
     }
 
-    // Rebuild mesh if needed
-    if (this.meshDirty) {
-      this.rebuildMesh();
-    }
-
-    // Update player
-    this.player.update(dt, this.world);
-
-    // Raycasting for block targeting
-    const eye = this.player.getEyePos();
-    const dir = this.player.getLookDir();
-    this.targetBlock = raycast(this.world, eye[0], eye[1], eye[2], dir[0], dir[1], dir[2], 7);
-
-    // Set matrices
+    // Always render (even when paused)
     const aspect = this.canvas.width / this.canvas.height;
     const proj = mat4Perspective(Math.PI / 3, aspect, 0.05, 80);
     const eyePos: [number, number, number] = [this.player.x, this.player.y + this.player.eyeHeight, this.player.z];
     const fwd: [number, number, number] = this.player.getLookDir();
     const target: [number, number, number] = [eyePos[0] + fwd[0], eyePos[1] + fwd[1], eyePos[2] + fwd[2]];
     const view = mat4LookAt(eyePos, target, [0, 1, 0]);
-
     this.renderer.projectionMatrix = proj;
     this.renderer.viewMatrix = view;
 
-    // Render
     if (this.worldMesh) {
       this.renderer.render(this.worldMesh, mat4Identity(), 0, this.targetBlock ? {
-        x: this.targetBlock.x,
-        y: this.targetBlock.y,
-        z: this.targetBlock.z,
+        x: this.targetBlock.x, y: this.targetBlock.y, z: this.targetBlock.z,
       } : null);
     }
 
-    // Callbacks
     this.callbacks.onStatsUpdate({
       fps: this.currentFps,
-      drawCalls: 1,
       triangles: this.worldMesh?.triangleCount ?? 0,
       res: `${this.canvas.width}x${this.canvas.height}`,
     });
-    this.callbacks.onHitUpdate(this.targetBlock);
-    this.callbacks.onPositionUpdate({ x: this.player.x, y: this.player.y, z: this.player.z });
+    if (this.network) this.callbacks.onRemotePlayersUpdate(Array.from(this.network.remotePlayers.values()));
   };
 
   destroy() {
     this.stop();
+    this.stopNetwork();
     window.removeEventListener('resize', this.handleResize);
     this.renderer.destroy();
   }
