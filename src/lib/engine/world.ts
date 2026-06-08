@@ -1,6 +1,6 @@
 // ==========================================
 // Voxel World - Chunk-based block storage + mesh generation
-// Supports configurable world size, terrain types, chunk rendering
+// Supports configurable world size, terrain types, parkour generation
 // ==========================================
 
 import { BlockType, BLOCK_COLORS } from './blocks';
@@ -10,7 +10,7 @@ export interface WorldSettings {
   seed: number;
   chunkSize: number;    // number of chunks in X and Z (square world)
   worldHeight: number;  // max Y blocks (32-128)
-  terrainType: 'normal' | 'flat' | 'mountains' | 'islands';
+  terrainType: 'normal' | 'flat' | 'mountains' | 'islands' | 'parkour';
   treeDensity: number;  // 0-100
 }
 
@@ -127,14 +127,18 @@ export class VoxelWorld {
   // ==========================================
 
   generateAll(): void {
-    // Pass 1: base terrain per chunk
-    for (let cx = 0; cx < this.settings.chunkSize; cx++) {
-      for (let cz = 0; cz < this.settings.chunkSize; cz++) {
-        this.generateChunkTerrain(cx, cz);
+    if (this.settings.terrainType === 'parkour') {
+      this.generateParkour();
+    } else {
+      // Pass 1: base terrain per chunk
+      for (let cx = 0; cx < this.settings.chunkSize; cx++) {
+        for (let cz = 0; cz < this.settings.chunkSize; cz++) {
+          this.generateChunkTerrain(cx, cz);
+        }
       }
+      // Pass 2: trees (needs world-space block access across chunk boundaries)
+      this.generateTrees();
     }
-    // Pass 2: trees (needs world-space block access across chunk boundaries)
-    this.generateTrees();
     // Mark all generated chunks dirty
     for (const chunk of this.chunks.values()) {
       chunk.dirty = true;
@@ -187,6 +191,176 @@ export class VoxelWorld {
               if (this.getBlock(bx, by, bz) === 0) {
                 this.setBlock(bx, by, bz, BlockType.Leaves);
               }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // ==========================================
+  // Parkour Terrain Generator
+  // Multi-level platforms with jumps between them
+  // ==========================================
+
+  private generateParkour(): void {
+    const rng = seededRandom(this.settings.seed + 77777);
+    const W = this.worldWidth;
+    const D = this.worldDepth;
+    const H = this.worldHeight;
+
+    // Fill the bottom layer with stone (void floor at y=0)
+    for (let x = 0; x < W; x++) {
+      for (let z = 0; z < D; z++) {
+        this.setBlock(x, 0, z, BlockType.Stone);
+      }
+    }
+
+    // Calculate number of levels based on world height
+    // Each level is about 8-10 blocks tall
+    const levelStep = 8;
+    const numLevels = Math.max(2, Math.floor((H - 8) / levelStep));
+
+    // Block types per level for visual variety
+    const levelBlocks: number[] = [
+      BlockType.Planks,
+      BlockType.Cobblestone,
+      BlockType.Sand,
+      BlockType.Snow,
+      BlockType.Planks,
+    ];
+
+    // Starting platform (large, at level 0)
+    const startY = 3;
+    const startSize = 6;
+    const startX = Math.floor(W / 2) - Math.floor(startSize / 2);
+    const startZ = Math.floor(D / 2) - Math.floor(startSize / 2);
+
+    for (let x = startX; x < startX + startSize && x < W; x++) {
+      for (let z = startZ; z < startZ + startSize && z < D; z++) {
+        for (let y = 1; y <= startY; y++) {
+          this.setBlock(x, y, z, y === startY ? BlockType.Planks : BlockType.Stone);
+        }
+      }
+    }
+
+    // Generate parkour path per level
+    let prevEndX = startX + startSize;
+    let prevEndZ = startZ + Math.floor(startSize / 2);
+
+    for (let level = 0; level < numLevels; level++) {
+      const baseY = startY + level * levelStep;
+      const surfaceY = baseY;
+      const surfaceBlock = levelBlocks[level % levelBlocks.length];
+      const supportBlock = BlockType.Stone;
+
+      // Number of platforms per level (more at lower levels)
+      const platformsPerLevel = 4 + Math.floor(rng() * 4);
+
+      // Current position for this level's path
+      let cx = level === 0 ? prevEndX : 4 + Math.floor(rng() * 6);
+      let cz = level === 0 ? prevEndZ : 4 + Math.floor(rng() * (D - 10));
+      let dirX = 1;
+      let dirZ = 0;
+
+      for (let p = 0; p < platformsPerLevel; p++) {
+        // Gap between platforms (2-3 blocks - jumpable)
+        const gap = 2 + Math.floor(rng() * 2);
+        // Platform size (3-6 blocks)
+        const size = 3 + Math.floor(rng() * 4);
+
+        // Move to next platform position
+        cx += dirX * gap;
+        cz += dirZ * gap;
+
+        // Clamp to world bounds
+        if (cx < 2 || cx + size >= W - 2 || cz < 2 || cz + size >= D - 2) {
+          // Change direction and reposition
+          cx = Math.max(3, Math.min(W - size - 3, Math.floor(W / 2) + Math.floor(rng() * 20) - 10));
+          cz = Math.max(3, Math.min(D - size - 3, Math.floor(D / 2) + Math.floor(rng() * 20) - 10));
+          dirX = rng() < 0.5 ? 1 : -1;
+          dirZ = 0;
+        }
+
+        // Build platform
+        for (let px = cx; px < cx + size && px < W - 1; px++) {
+          for (let pz = cz; pz < cz + size && pz < D - 1; pz++) {
+            // Surface
+            this.setBlock(px, surfaceY, pz, surfaceBlock);
+            // Support pillars underneath (every 2 blocks)
+            if ((px - cx) % 2 === 0 && (pz - cz) % 2 === 0) {
+              for (let y = 1; y < surfaceY; y++) {
+                this.setBlock(px, y, pz, supportBlock);
+              }
+            }
+          }
+        }
+
+        // Add walls/barriers on some platforms (obstacles)
+        if (rng() < 0.3 && size >= 4) {
+          const wallLen = Math.min(size - 2, 2 + Math.floor(rng() * 2));
+          const wallSide = Math.floor(rng() * 4);
+          for (let w = 0; w < wallLen; w++) {
+            let wx = cx, wz = cz;
+            switch (wallSide) {
+              case 0: wx = cx + 1 + w; wz = cz; break;           // front edge
+              case 1: wx = cx + size - 2; wz = cz + 1 + w; break; // right edge
+              case 2: wx = cx + w; wz = cz + size - 2; break;     // back edge
+              case 3: wx = cx; wz = cz + w; break;                 // left edge
+            }
+            this.setBlock(wx, surfaceY + 1, wz, BlockType.Cobblestone);
+          }
+        }
+
+        // Randomly change direction
+        if (rng() < 0.35) {
+          const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+          const pick = dirs[Math.floor(rng() * dirs.length)];
+          dirX = pick[0];
+          dirZ = pick[1];
+        }
+
+        // Transition to next level: add stepping stones going UP
+        if (p === platformsPerLevel - 1 && level < numLevels - 1) {
+          const nextY = baseY + levelStep;
+          const midY = baseY + Math.floor(levelStep / 2);
+          // 2-3 stepping stones to jump upward
+          const stoneX = cx + size + 1;
+          const stoneZ = cz + Math.floor(size / 2);
+          for (let step = 0; step < 2; step++) {
+            const sy = midY + step * Math.floor(levelStep / 2);
+            if (stoneX + step < W - 1 && sy < H - 2) {
+              this.setBlock(stoneX + step, sy, stoneZ, BlockType.Planks);
+              this.setBlock(stoneX + step, sy - 1, stoneZ, BlockType.Stone);
+              // Small platform around the stone
+              if (stoneZ > 1) this.setBlock(stoneX + step, sy, stoneZ - 1, BlockType.Planks);
+              if (stoneZ + 1 < D - 1) this.setBlock(stoneX + step, sy, stoneZ + 1, BlockType.Planks);
+            }
+          }
+        }
+
+        // Update path end position
+        prevEndX = cx + size;
+        prevEndZ = cz + Math.floor(size / 2);
+      }
+    }
+
+    // Add a "finish" platform at the top
+    const finishY = startY + numLevels * levelStep;
+    if (finishY < H - 4) {
+      const finishSize = 8;
+      const finishX = Math.floor(W / 2) - Math.floor(finishSize / 2);
+      const finishZ = Math.floor(D / 2) - Math.floor(finishSize / 2);
+      for (let x = finishX; x < finishX + finishSize && x < W; x++) {
+        for (let z = finishZ; z < finishZ + finishSize && z < D; z++) {
+          for (let y = 1; y <= finishY; y++) {
+            this.setBlock(x, y, z, y === finishY ? BlockType.Snow : BlockType.Stone);
+          }
+          // Pillar on corners
+          if ((x === finishX || x === finishX + finishSize - 1) &&
+              (z === finishZ || z === finishZ + finishSize - 1)) {
+            for (let y = finishY + 1; y <= finishY + 3 && y < H; y++) {
+              this.setBlock(x, y, z, BlockType.Cobblestone);
             }
           }
         }

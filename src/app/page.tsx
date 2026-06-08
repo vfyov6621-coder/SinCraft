@@ -18,7 +18,7 @@ import { Separator } from '@/components/ui/separator';
 import {
   Gauge, Triangle, Monitor, Info, Play, Plus, Trash2, Save, FolderOpen,
   Globe, Users, Pause, LogOut, ArrowLeft, Mountain, Waves, Trees, Box,
-  Loader2, Eye,
+  Loader2, Eye, Zap, Footprints,
 } from 'lucide-react';
 
 type Screen = 'menu' | 'worlds' | 'create' | 'playing' | 'multiplayer';
@@ -28,6 +28,7 @@ const TERRAIN_LABELS: Record<string, string> = {
   flat: 'Flat',
   mountains: 'Mountains',
   islands: 'Islands',
+  parkour: 'Parkour',
 };
 
 const TERRAIN_ICONS: Record<string, React.ReactNode> = {
@@ -35,7 +36,18 @@ const TERRAIN_ICONS: Record<string, React.ReactNode> = {
   flat: <Box className="w-4 h-4" />,
   mountains: <Mountain className="w-4 h-4" />,
   islands: <Waves className="w-4 h-4" />,
+  parkour: <Footprints className="w-4 h-4" />,
 };
+
+const TERRAIN_DESC: Record<string, string> = {
+  normal: 'Hills and forests',
+  flat: 'Flat plains',
+  mountains: 'Tall peaks',
+  islands: 'Floating islands',
+  parkour: 'Multi-level jump platforms',
+};
+
+const ALL_TERRAINS = ['normal', 'flat', 'mountains', 'islands', 'parkour'] as const;
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -51,6 +63,8 @@ export default function Home() {
   const [paused, setPaused] = useState(false);
   const [resolutionScale, setResolutionScale] = useState(0.75);
   const [renderDistance, setRenderDistance] = useState(8);
+  const [maxFps, setMaxFps] = useState(0); // 0 = unlimited
+  const [directionalRendering, setDirectionalRendering] = useState(true);
   const [loadingText, setLoadingText] = useState('');
 
   // World creation settings
@@ -92,6 +106,14 @@ export default function Home() {
     if (renderDistance && gameRef.current) gameRef.current.setRenderDistance(renderDistance);
   }, [renderDistance]);
 
+  useEffect(() => {
+    if (gameRef.current) gameRef.current.setMaxFps(maxFps);
+  }, [maxFps]);
+
+  useEffect(() => {
+    if (gameRef.current) gameRef.current.directionalRendering = directionalRendering;
+  }, [directionalRendering]);
+
   const togglePause = useCallback(() => {
     if (!gameRef.current) return;
     gameRef.current.togglePause();
@@ -128,7 +150,7 @@ export default function Home() {
           console.error('Auto-save failed:', e);
         }
       }
-    }, 20000);
+    }, 30000);
     autoSaveTimerRef.current = timer;
   }, []);
 
@@ -166,19 +188,19 @@ export default function Home() {
     setLoadingText('Building terrain...');
     await new Promise(r => setTimeout(r, 10));
 
-    const game = new Game(canvasRef.current, { resolutionScale, renderDistance });
+    const game = new Game(canvasRef.current, { resolutionScale, renderDistance, maxFps });
     game.callbacks.onStatsUpdate = setStats;
     game.callbacks.onPause = () => setPaused(true);
     game.callbacks.onRemotePlayersUpdate = (players) => setRemotePlayers(players.map(p => ({ id: p.id, name: p.name, color: p.color })));
     game.callbacks.onSlotChange = setSelectedSlot;
-    // Init with settings (generates terrain + builds meshes)
+    game.directionalRendering = directionalRendering;
     game.init(settings, savedChunks, savedPlayer);
     gameRef.current = game;
     setLoadingText('');
 
     readyTimerRef.current = setTimeout(() => setReady(true), 100);
     startAutoSave(id, name);
-  }, [resolutionScale, renderDistance, startAutoSave]);
+  }, [resolutionScale, renderDistance, maxFps, directionalRendering, startAutoSave]);
 
   // Load saved world
   const loadAndStartWorld = useCallback(async (worldId: string) => {
@@ -199,18 +221,19 @@ export default function Home() {
     setLoadingText('Building chunks...');
     await new Promise(r => setTimeout(r, 10));
 
-    const game = new Game(canvasRef.current, { resolutionScale, renderDistance });
+    const game = new Game(canvasRef.current, { resolutionScale, renderDistance, maxFps });
     game.callbacks.onStatsUpdate = setStats;
     game.callbacks.onPause = () => setPaused(true);
     game.callbacks.onRemotePlayersUpdate = (players) => setRemotePlayers(players.map(p => ({ id: p.id, name: p.name, color: p.color })));
     game.callbacks.onSlotChange = setSelectedSlot;
+    game.directionalRendering = directionalRendering;
     game.init(meta.settings, chunks, { x: meta.playerX, y: meta.playerY, z: meta.playerZ, yaw: meta.playerYaw });
     gameRef.current = game;
     setLoadingText('');
 
     readyTimerRef.current = setTimeout(() => setReady(true), 100);
     startAutoSave(worldId, meta.name);
-  }, [resolutionScale, renderDistance, startAutoSave]);
+  }, [resolutionScale, renderDistance, maxFps, directionalRendering, startAutoSave]);
 
   // Cleanup
   useEffect(() => {
@@ -250,6 +273,7 @@ export default function Home() {
   }, [refreshWorlds]);
 
   const fpsColor = stats.fps >= 50 ? 'text-emerald-400' : stats.fps >= 30 ? 'text-yellow-400' : 'text-red-400';
+  const maxFpsLabel = maxFps === 0 ? 'VSync' : `${maxFps}`;
 
   const blockColorMap: Record<number, string> = {
     [BlockType.Grass]: 'bg-green-600', [BlockType.Dirt]: 'bg-amber-700',
@@ -314,7 +338,7 @@ export default function Home() {
                 <p className="text-[10px] text-gray-500">
                   {w.settings.chunkSize}x{w.settings.chunkSize} chunks ({w.settings.chunkSize * CHUNK_SIZE}x{w.settings.chunkSize * CHUNK_SIZE} blocks)
                   &middot; H{w.settings.worldHeight}
-                  &middot; {TERRAIN_LABELS[w.settings.terrainType]}
+                  &middot; {TERRAIN_LABELS[w.settings.terrainType] || w.settings.terrainType}
                   &middot; {new Date(w.updatedAt).toLocaleDateString()}
                 </p>
               </div>
@@ -376,26 +400,29 @@ export default function Home() {
 
           <div>
             <label className="text-xs text-gray-500 mb-1 block">Terrain Type</label>
-            <div className="grid grid-cols-2 gap-1.5">
-              {(['normal', 'flat', 'mountains', 'islands'] as const).map(t => (
+            <div className="grid grid-cols-3 gap-1.5">
+              {ALL_TERRAINS.map(t => (
                 <button key={t} onClick={() => setTerrainType(t)}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs border transition-colors ${
+                  className={`flex flex-col items-center gap-0.5 px-2 py-2 rounded-md text-xs border transition-colors ${
                     terrainType === t ? 'border-emerald-500 bg-emerald-950 text-emerald-400' : 'border-gray-700 bg-gray-900 text-gray-400 hover:border-gray-600'
                   }`}>
                   {TERRAIN_ICONS[t]}
-                  {TERRAIN_LABELS[t]}
+                  <span className="text-[10px]">{TERRAIN_LABELS[t]}</span>
                 </button>
               ))}
             </div>
+            <p className="text-[10px] text-gray-600 mt-1">{TERRAIN_DESC[terrainType]}</p>
           </div>
 
-          <div>
-            <div className="flex justify-between mb-1">
-              <label className="text-xs text-gray-500 flex items-center gap-1"><Trees className="w-3 h-3" />Tree Density</label>
-              <span className="text-xs text-emerald-400 font-mono">{treeDensity}%</span>
+          {terrainType !== 'parkour' && (
+            <div>
+              <div className="flex justify-between mb-1">
+                <label className="text-xs text-gray-500 flex items-center gap-1"><Trees className="w-3 h-3" />Tree Density</label>
+                <span className="text-xs text-emerald-400 font-mono">{treeDensity}%</span>
+              </div>
+              <Slider value={[treeDensity]} onValueChange={v => setTreeDensity(v[0])} min={0} max={100} step={5} className="w-full" />
             </div>
-            <Slider value={[treeDensity]} onValueChange={v => setTreeDensity(v[0])} min={0} max={100} step={5} className="w-full" />
-          </div>
+          )}
         </div>
 
         {memMB > 100 && (
@@ -409,7 +436,7 @@ export default function Home() {
           const seed = newWorldSeed.trim() ? parseInt(newWorldSeed) || Math.floor(Math.random() * 99999) : Math.floor(Math.random() * 99999);
           const settings: WorldSettings = {
             seed, chunkSize: worldChunkSize, worldHeight,
-            terrainType, treeDensity,
+            terrainType, treeDensity: terrainType === 'parkour' ? 0 : treeDensity,
           };
           startGame(settings, generateId(), name);
         }} className="w-full h-11 bg-emerald-600 hover:bg-emerald-500 gap-2">
@@ -591,7 +618,7 @@ export default function Home() {
                     <p className="text-[10px] text-gray-600 mt-1">
                       {gameRef.current.settings.chunkSize}x{gameRef.current.settings.chunkSize} chunks
                       &middot; H{gameRef.current.settings.worldHeight}
-                      &middot; {TERRAIN_LABELS[gameRef.current.settings.terrainType]}
+                      &middot; {TERRAIN_LABELS[gameRef.current.settings.terrainType] || gameRef.current.settings.terrainType}
                     </p>
                   )}
                 </div>
@@ -603,8 +630,9 @@ export default function Home() {
                 </Button>
 
                 {/* Render settings */}
-                <div className="bg-gray-800/50 rounded-md p-2.5 space-y-2">
-                  <p className="text-xs text-gray-400 font-semibold">Settings</p>
+                <div className="bg-gray-800/50 rounded-md p-2.5 space-y-2.5">
+                  <p className="text-xs text-gray-400 font-semibold flex items-center gap-1"><Monitor className="w-3 h-3" />Render Settings</p>
+
                   <div>
                     <div className="flex justify-between mb-0.5">
                       <label className="text-[10px] text-gray-500">Resolution Scale</label>
@@ -612,13 +640,41 @@ export default function Home() {
                     </div>
                     <Slider value={[resolutionScale]} onValueChange={v => setResolutionScale(v[0])} min={0.25} max={1} step={0.05} className="w-full" />
                   </div>
+
                   <div>
                     <div className="flex justify-between mb-0.5">
                       <label className="text-[10px] text-gray-500">Render Distance</label>
                       <span className="text-[10px] text-emerald-400 font-mono">{renderDistance} chunks</span>
                     </div>
-                    <Slider value={[renderDistance]} onValueChange={v => setRenderDistance(v[0])} min={2} max={24} step={1} className="w-full" />
+                    <Slider value={[renderDistance]} onValueChange={v => setRenderDistance(v[0])} min={2} max={50} step={1} className="w-full" />
                   </div>
+
+                  <div>
+                    <div className="flex justify-between mb-0.5">
+                      <label className="text-[10px] text-gray-500 flex items-center gap-1"><Zap className="w-3 h-3" />Max FPS</label>
+                      <span className="text-[10px] text-emerald-400 font-mono">{maxFpsLabel}</span>
+                    </div>
+                    <Slider value={[maxFps]} onValueChange={v => setMaxFps(v[0])} min={0} max={240} step={15} className="w-full" />
+                    <div className="flex justify-between mt-0.5">
+                      <span className="text-[9px] text-gray-600">0 = VSync</span>
+                      <span className="text-[9px] text-gray-600">240 max</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] text-gray-500 flex items-center gap-1"><Eye className="w-3 h-3" />Directional Render</label>
+                    <button
+                      onClick={() => setDirectionalRendering(!directionalRendering)}
+                      className={`text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                        directionalRendering
+                          ? 'border-emerald-600 bg-emerald-950 text-emerald-400'
+                          : 'border-gray-600 bg-gray-900 text-gray-500'
+                      }`}
+                    >
+                      {directionalRendering ? 'ON' : 'OFF'}
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-gray-600">Directional: only render chunks in front of you</p>
                 </div>
 
                 {!isMultiplayer && (

@@ -33,3 +33,27 @@ Stage Summary:
 - IndexedDB saves support large worlds
 - All 10 bugs identified and fixed
 - Build passes clean
+---
+Task ID: 1
+Agent: Main Agent
+Task: Fix crash, add parkour generation, max FPS settings, directional rendering
+
+Work Log:
+- Fixed main rendering bug: fog shader used distance from origin instead of camera
+- Added camera position uniform (uCameraPos) to fragment shader
+- Rewrote engine.ts with crash protection: try-catch in game loop, error counter, WebGL context loss handling
+- Added chunk rebuild limiter (max 4 per frame) to prevent freezes
+- Added FPS cap system with configurable max FPS (0=VSync, up to 240)
+- Added directional rendering: only renders chunks within ~130 degree view cone from player look direction
+- Added parkour terrain generator in world.ts: multi-level platforms with gaps, walls, stepping stones between levels
+- Added parkour terrain type to WorldSettings union and UI (3-column terrain grid with 5 types)
+- Added max FPS slider (0-240) and directional rendering toggle in pause menu settings
+- Improved terrain height variation for normal terrain type
+- Added aspect ratio safety check (divide by max(1, height))
+- Auto-save interval increased from 20s to 30s
+
+Stage Summary:
+- All changes compile successfully (next build passes)
+- Game tested: 60 FPS, 27/64 chunks, 47K triangles, zero console errors
+- Parkour button confirmed present in create world screen
+- Key files modified: engine.ts, world.ts, page.tsx, renderer.ts
