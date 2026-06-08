@@ -57,6 +57,7 @@ export class Engine3D {
     this.buildScene();
     this.handleResize();
     window.addEventListener('resize', this.handleResize);
+    this.start();
   }
 
   private handleResize = () => {
