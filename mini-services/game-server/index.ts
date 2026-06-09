@@ -1,6 +1,6 @@
-// LiteCraft Game Server - WebSocket multiplayer for LAN
+// SinCraft Game Server - WebSocket multiplayer for LAN / Tailscale
 
-const PORT = 3003;
+const PORT = parseInt(process.env.PORT || '3003');
 
 interface Player {
   id: string;
@@ -32,7 +32,7 @@ const server = Bun.serve({
   fetch(req, server) {
     const success = server.upgradeWebSocket(req);
     if (success) return undefined;
-    return new Response("LiteCraft Game Server", { status: 200 });
+    return new Response("SinCraft Game Server", { status: 200 });
   },
   websocket: {
     open(ws) {
@@ -112,4 +112,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`LiteCraft Game Server running on ws://localhost:${PORT}`);
+console.log(`SinCraft Game Server running on ws://0.0.0.0:${PORT}`);

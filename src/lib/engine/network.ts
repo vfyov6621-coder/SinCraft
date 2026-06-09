@@ -46,9 +46,16 @@ export class GameNetwork {
     };
   }
 
-  connect(port: number = 3003) {
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${location.host}/?XTransformPort=${port}`;
+  connect(port: number = 3003, directHost?: string) {
+    let url: string;
+    if (directHost) {
+      // Direct connection (Tailscale IP or LAN IP)
+      url = `ws://${directHost}:${port}`;
+    } else {
+      // Reverse proxy via Caddy
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      url = `${protocol}//${location.host}/?XTransformPort=${port}`;
+    }
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {

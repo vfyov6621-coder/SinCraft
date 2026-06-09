@@ -157,6 +157,7 @@ export default function Home() {
   const [isHost, setIsHost] = useState(false);
   const [remotePlayers, setRemotePlayers] = useState<{ id: string; name: string; color: string }[]>([]);
   const [lanPort, setLanPort] = useState(3003);
+  const [directHost, setDirectHost] = useState('');
 
   // Current world
   const [currentWorldId, setCurrentWorldId] = useState<string | null>(null);
@@ -302,6 +303,20 @@ export default function Home() {
     gameRef.current.hostNetwork(generateId(), playerName, playerColor, lanPort);
     setIsMultiplayer(true); setIsHost(true);
   }, [playerName, playerColor, lanPort]);
+
+  const joinDirectGame = useCallback(() => {
+    if (!directHost.trim()) return;
+    localStorage.setItem('sincraft_name', playerName);
+    localStorage.setItem('sincraft_color', playerColor);
+    const settings = defaultSettings();
+    startGame(settings, generateId(), 'Сетевой мир');
+    setTimeout(() => {
+      if (gameRef.current) {
+        gameRef.current.startNetwork(generateId(), playerName, playerColor, lanPort, directHost.trim());
+        setIsMultiplayer(true); setIsHost(false);
+      }
+    }, 500);
+  }, [playerName, playerColor, lanPort, directHost, startGame]);
 
   const deleteSavedWorld = useCallback(async (id: string) => { await deleteWorld(id); refreshWorlds(); }, [refreshWorlds]);
 
@@ -598,12 +613,15 @@ export default function Home() {
           <h2 className="text-xl font-bold flex-1">Сетевая игра</h2>
         </div>
         <div className="bg-gray-900/50 rounded-xl p-4 border border-gray-800/50 space-y-3">
-          <p className="text-xs text-gray-400">Для игры по сети используйте <span className="text-emerald-400 font-semibold">Tailscale</span> чтобы создать общую локальную сеть между игроками.</p>
-          <div className="bg-emerald-950/30 rounded-lg p-2 text-[10px] text-emerald-400/70 space-y-1">
-            <p>1. Установите Tailscale на tailscale.com</p>
-            <p>2. Авторизуйтесь и создайте хвост-сеть</p>
-            <p>3. Создайте мир — один игрок хостит</p>
-            <p>4. Другой подключается по Tailscale IP</p>
+          <div className="flex items-center gap-2">
+            <Wifi className="w-4 h-4 text-emerald-400" />
+            <p className="text-xs text-gray-400">Для игры по сети используйте <span className="text-emerald-400 font-semibold">Tailscale</span></p>
+          </div>
+          <div className="bg-emerald-950/30 rounded-lg p-2.5 text-[10px] text-emerald-400/70 space-y-1">
+            <p><span className="text-emerald-400 font-semibold">1.</span> Установите Tailscale на tailscale.com</p>
+            <p><span className="text-emerald-400 font-semibold">2.</span> Авторизуйтесь и подключитесь к сети</p>
+            <p><span className="text-emerald-400 font-semibold">3.</span> Хост: создайте мир, нажмите «Открыть сервер» в паузе</p>
+            <p><span className="text-emerald-400 font-semibold">4.</span> Гость: введите Tailscale IP хоста и подключитесь</p>
           </div>
         </div>
         <div className="space-y-3">
@@ -611,24 +629,22 @@ export default function Home() {
           <div className="flex items-center justify-center gap-2">
             <input type="color" value={playerColor} onChange={e => setPlayerColor(e.target.value)} className="w-7 h-7 rounded cursor-pointer border-0 bg-transparent" />
           </div>
+          <div>
+            <div className="flex justify-between mb-1"><label className="text-xs text-gray-500">Порт</label><span className="text-xs text-emerald-400 font-mono">{lanPort}</span></div>
+            <Input value={lanPort} onChange={e => setLanPort(parseInt(e.target.value) || 3003)} type="number" className="bg-gray-900/60 border-gray-700/50 rounded-lg h-10" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 mb-1 block">Tailscale IP хоста</label>
+            <Input value={directHost} onChange={e => setDirectHost(e.target.value)} placeholder="100.x.x.x" className="bg-gray-900/60 border-gray-700/50 rounded-lg h-10" />
+            <p className="text-[9px] text-gray-600 mt-0.5">Оставьте пустым для подключения через прокси</p>
+          </div>
         </div>
-        <Button onClick={() => { refreshWorlds(); setScreen('worlds'); }} className="w-full bg-emerald-600 hover:bg-emerald-500 gap-2 rounded-xl shadow-lg shadow-emerald-900/30">
-          <Globe className="w-4 h-4" /> Создать комнату
-        </Button>
         <Separator className="bg-gray-800/50" />
-        <Button onClick={() => {
-          localStorage.setItem('sincraft_name', playerName);
-          localStorage.setItem('sincraft_color', playerColor);
-          const settings = defaultSettings();
-          startGame(settings, generateId(), 'Сетевой мир');
-          setTimeout(() => {
-            if (gameRef.current) {
-              gameRef.current.startNetwork(generateId(), playerName, playerColor, lanPort);
-              setIsMultiplayer(true); setIsHost(false);
-            }
-          }, 500);
-        }} className="w-full bg-blue-600 hover:bg-blue-500 gap-2 rounded-xl">
-          <Wifi className="w-4 h-4" /> Подключиться
+        <Button onClick={() => { refreshWorlds(); setScreen('worlds'); }} className="w-full bg-emerald-600 hover:bg-emerald-500 gap-2 rounded-xl shadow-lg shadow-emerald-900/30">
+          <Globe className="w-4 h-4" /> Создать комнату (хост)
+        </Button>
+        <Button onClick={joinDirectGame} className="w-full bg-blue-600 hover:bg-blue-500 gap-2 rounded-xl" disabled={!directHost.trim()}>
+          <Wifi className="w-4 h-4" /> Подключиться (гость)
         </Button>
       </div>
     </div>

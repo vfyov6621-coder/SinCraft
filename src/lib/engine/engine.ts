@@ -227,14 +227,17 @@ export class Game {
     };
   }
 
-  startNetwork(pid: string, name: string, color: string, port?: number) {
+  private directHost: string | undefined;
+
+  startNetwork(pid: string, name: string, color: string, port?: number, host?: string) {
+    this.directHost = host;
     this.network = new GameNetwork(pid, name, color, {
       onWorldData: (data) => { this.world.deserializeChunks(new Map(Object.entries(data))); this.rebuildDirtyChunks(); },
       onBlockSet: (x, y, z, type) => { this.world.setBlock(x, y, z, type as BlockType); this.rebuildDirtyChunks(); },
       onPlayerJoin: () => {}, onPlayerLeave: () => {},
       onPlayerPos: () => {}, onPlayersList: () => {}, onChat: () => {},
     });
-    this.network.connect(port);
+    this.network.connect(port, host);
   }
 
   hostNetwork(pid: string, name: string, color: string, port?: number) {
