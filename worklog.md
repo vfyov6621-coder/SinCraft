@@ -134,3 +134,33 @@ Stage Summary:
 - Build commands: npm run electron, npm run electron:build
 - electron-builder config for Windows NSIS installer
 
+
+---
+Task ID: 1
+Agent: main
+Task: Create portable .exe for SinCraft + fix crafting/UI bugs
+
+Work Log:
+- Examined full project structure (12 engine files, Electron shell, Next.js static export)
+- Fixed phantom block bug in crafting: `handleCraftSlotClick` was mutating `heldItem` directly; created proper immutable copies via `let newHeldItem`
+- Fixed crafting result handler: added ingredient verification before consumption, removed `heldItem` dependency to prevent stale closures
+- Added `useMemo` for hotbar computation to reduce unnecessary re-renders
+- Increased UI update throttle intervals: stats 100ms→200ms, health 250ms→500ms to reduce freeze
+- Updated `electron/main.js` path resolution for portable mode (`__dirname` relative instead of `process.resourcesPath`)
+- Generated SinCraft icon (PNG→ICO with multiple sizes: 16-256px)
+- Built Next.js static export (`next build` with `output: "export"`)
+- Used `electron-builder --win --x64 --dir` to create win-unpacked structure (fails on signing but exe is created)
+- Created portable build script `build-portable.js` that:
+  - Removes app.asar to use raw app/ directory
+  - Copies electron files into resources/app/electron/
+  - Copies static export into resources/app/
+  - Adds `<base href="./">` for relative paths in Electron file:// protocol
+  - Copies ws module for embedded game server
+- Final output: `download/SinCraft-Portable-2.0.0.zip` (111MB)
+
+Stage Summary:
+- SinCraft.exe portable build ready at download/SinCraft-Portable-2.0.0.zip
+- Crafting phantom block bug fixed (immutable state updates)
+- UI freeze mitigated (reduced setState frequency)
+- Note: Cannot create NSIS installer on Linux without wine — portable zip only
+- To get a proper .exe installer: run `npm run electron:build` on a Windows machine

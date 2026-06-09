@@ -25,8 +25,9 @@ function getStaticPath() {
     // In dev, try the `out/` directory from Next.js static export
     return path.join(__dirname, '..', 'out');
   }
-  // In production (packaged), use resources
-  return path.join(process.resourcesPath, 'app');
+  // In production (packaged): this file is at resources/app/electron/main.js
+  // index.html is at resources/app/index.html
+  return path.join(__dirname, '..');
 }
 
 // ==========================================

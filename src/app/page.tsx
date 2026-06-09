@@ -449,34 +449,35 @@ export default function Home() {
 
   // Craft grid click handler
   const handleCraftSlotClick = useCallback((idx: number) => {
-    const grid = [...craftGrid];
+    const grid = craftGrid.map(s => s ? { ...s } : null);
     const slot = grid[idx];
+    let newHeldItem: ItemStack | null = heldItem ? { ...heldItem } : null;
 
-    if (heldItem) {
+    if (newHeldItem) {
       if (!slot || slot.count === 0 || slot.block === BlockType.Air) {
-        grid[idx] = { ...heldItem };
-        setHeldItem(null);
-      } else if (slot.block === heldItem.block) {
+        grid[idx] = { ...newHeldItem };
+        newHeldItem = null;
+      } else if (slot.block === newHeldItem.block) {
         const space = 64 - slot.count;
-        if (space >= heldItem.count) {
-          slot.count += heldItem.count;
-          setHeldItem(null);
+        if (space >= newHeldItem.count) {
+          slot.count += newHeldItem.count;
+          newHeldItem = null;
         } else {
-          heldItem.count -= space;
+          newHeldItem = { ...newHeldItem, count: newHeldItem.count - space };
           slot.count = 64;
-          setHeldItem({ ...heldItem });
         }
       } else {
-        grid[idx] = { ...heldItem };
-        setHeldItem({ ...slot });
+        grid[idx] = { ...newHeldItem };
+        newHeldItem = { ...slot };
       }
     } else {
       if (slot && slot.count > 0 && slot.block !== BlockType.Air) {
         grid[idx] = null;
-        setHeldItem({ ...slot });
+        newHeldItem = { ...slot };
       }
     }
     setCraftGrid(grid);
+    setHeldItem(newHeldItem);
   }, [heldItem, craftGrid]);
 
   // Craft result handler
@@ -485,7 +486,21 @@ export default function Home() {
     if (!recipe || !gameRef.current) return;
     const { result, needed } = recipe;
 
-    // Consume ingredients from craft grid
+    // Verify we actually have enough ingredients in the grid
+    const ingredients: { block: BlockType; count: number }[] = [];
+    for (const slot of craftGrid) {
+      if (slot && slot.count > 0 && slot.block !== BlockType.Air) {
+        const existing = ingredients.find(i => i.block === slot.block);
+        if (existing) existing.count += slot.count;
+        else ingredients.push({ block: slot.block, count: slot.count });
+      }
+    }
+    for (const ing of needed) {
+      const found = ingredients.find(i => i.block === ing.block && i.count >= ing.count);
+      if (!found) return; // Not enough ingredients — abort silently
+    }
+
+    // Consume ingredients from craft grid (exact amounts only)
     const grid = craftGrid.map(s => s ? { ...s } : null);
     for (const ing of needed) {
       let remaining = ing.count;
@@ -500,18 +515,17 @@ export default function Home() {
     }
     setCraftGrid(grid);
 
-    // Add result to inventory or held item
-    if (heldItem && heldItem.block === result.block && heldItem.count + result.count <= 64) {
-      setHeldItem({ ...heldItem, count: heldItem.count + result.count });
-    } else {
-      addToInventory(gameRef.current.inventory, result.block, result.count);
-      gameRef.current.callbacks.onInventoryUpdate([...gameRef.current.inventory]);
-    }
-  }, [craftGrid, heldItem]);
+    // Add result to inventory
+    addToInventory(gameRef.current.inventory, result.block, result.count);
+    setInventory([...gameRef.current.inventory]);
+  }, [craftGrid]);
 
   const craftResult = useMemo(() => checkCraftingGrid(craftGrid), [craftGrid]);
 
-  const hotbar = inventory.length >= 9 ? inventory.slice(0, 9) : HOTBAR_BLOCKS.map(b => ({ block: b, count: gameRef.current?.settings.gameMode === 'creative' ? 64 : 0 }));
+  const hotbar = useMemo(() => {
+    if (inventory.length >= 9) return inventory.slice(0, 9);
+    return HOTBAR_BLOCKS.map(b => ({ block: b, count: gameRef.current?.settings.gameMode === 'creative' ? 64 : 0 }));
+  }, [inventory]);
 
   // ==================== MAIN MENU ====================
   if (screen === 'menu') return (

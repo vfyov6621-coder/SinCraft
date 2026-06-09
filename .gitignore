@@ -52,3 +52,14 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# Electron build output
+/dist-electron/
+
+# Portable builds and archives
+/download/*.zip
+/download/*.exe
+
+# Database
+/prisma/*.db
+/db/*.db

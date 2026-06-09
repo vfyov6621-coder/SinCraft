@@ -55,8 +55,8 @@ export class Game {
   // Throttle for UI updates
   private lastStatsUpdate = 0;
   private lastHealthUpdate = 0;
-  private statsUpdateInterval = 0.1; // 100ms
-  private healthUpdateInterval = 0.25; // 250ms
+  private statsUpdateInterval = 0.2; // 200ms
+  private healthUpdateInterval = 0.5; // 500ms
   private cachedStats: GameStats = { fps: 0, flying: false, health: 20, hunger: 20, position: { x: 0, y: 0, z: 0 } };
 
   renderDistance = 10;
