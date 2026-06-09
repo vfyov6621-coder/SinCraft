@@ -117,7 +117,7 @@ export class Renderer {
   fogFar = 55;
   ambientStrength = 0.45;
   lightDir: [number, number, number] = [0.3, 0.8, 0.5];
-  shadowStrength = 0.6; // AO intensity (0 = off, 1 = full)
+  shadowStrength = 0.3; // Face AO intensity (vertex AO in mesh builder handles main shadows)
 
   // Stats
   drawCalls = 0;

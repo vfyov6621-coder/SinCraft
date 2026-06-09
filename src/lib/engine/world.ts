@@ -473,9 +473,8 @@ export class VoxelWorld {
           const wz = wz0 + lz;
           const em = bd.emissive || 0;
 
-          // Face culling: only add face if adjacent block is air or transparent
           const addFace = (face: string, color: number[]) => {
-            this.addFaceData(wx, ly, wz, face, color, em, vertices, normals, colors, emissive, indices, vertCount);
+            this.addFaceDataAO(wx, ly, wz, face, color, em, vertices, normals, colors, emissive, indices, vertCount);
             vertCount += 4;
           };
 
@@ -493,22 +492,55 @@ export class VoxelWorld {
     return { vertices, normals, colors, indices, emissive };
   }
 
-  private addFaceData(x: number, y: number, z: number, face: string, color: number[], em: number,
+  private vertexAO(s1: boolean, s2: boolean, c: boolean): number {
+    if (s1 && s2) return 0.35; // fully occluded corner
+    const v = 3 - (s1 ? 1 : 0) - (s2 ? 1 : 0) - (c ? 1 : 0);
+    return [0.55, 0.7, 0.85, 1.0][v];
+  }
+
+  private addFaceDataAO(x: number, y: number, z: number, face: string, color: number[], em: number,
     verts: number[], norms: number[], cols: number[], emis: number[], idx: number[], offset: number) {
-    const faces: Record<string, { pos: number[][]; normal: number[] }> = {
-      top:    { pos: [[x,y+1,z],[x,y+1,z+1],[x+1,y+1,z+1],[x+1,y+1,z]], normal: [0,1,0] },
-      bottom: { pos: [[x,y,z+1],[x,y,z],[x+1,y,z],[x+1,y,z+1]], normal: [0,-1,0] },
-      east:   { pos: [[x+1,y,z+1],[x+1,y,z],[x+1,y+1,z],[x+1,y+1,z+1]], normal: [1,0,0] },
-      west:   { pos: [[x,y,z],[x,y,z+1],[x,y+1,z+1],[x,y+1,z]], normal: [-1,0,0] },
-      south:  { pos: [[x,y,z+1],[x+1,y,z+1],[x+1,y+1,z+1],[x,y+1,z+1]], normal: [0,0,1] },
-      north:  { pos: [[x+1,y,z],[x,y,z],[x,y+1,z],[x+1,y+1,z]], normal: [0,0,-1] },
+    const faces: Record<string, { pos: number[][]; normal: number[]; ao: [number[], number[], number[]][] }> = {
+      top: {
+        pos: [[x,y+1,z],[x,y+1,z+1],[x+1,y+1,z+1],[x+1,y+1,z]], normal: [0,1,0],
+        ao: [[[-1,1,0],[0,1,-1],[-1,1,-1]],[[-1,1,1],[0,1,2],[-1,1,2]],[[2,1,1],[1,1,2],[2,1,2]],[[2,1,0],[1,1,-1],[2,1,-1]]],
+      },
+      bottom: {
+        pos: [[x,y,z+1],[x,y,z],[x+1,y,z],[x+1,y,z+1]], normal: [0,-1,0],
+        ao: [[[-1,-1,1],[0,-1,2],[-1,-1,2]],[[-1,-1,0],[0,-1,-1],[-1,-1,-1]],[[2,-1,0],[1,-1,-1],[2,-1,-1]],[[2,-1,1],[1,-1,2],[2,-1,2]]],
+      },
+      east: {
+        pos: [[x+1,y,z+1],[x+1,y,z],[x+1,y+1,z],[x+1,y+1,z+1]], normal: [1,0,0],
+        ao: [[[1,0,2],[1,-1,1],[1,-1,2]],[[1,0,-1],[1,-1,0],[1,-1,-1]],[[1,2,-1],[1,1,0],[1,1,-1]],[[1,2,2],[1,1,1],[1,1,2]]],
+      },
+      west: {
+        pos: [[x,y,z],[x,y,z+1],[x,y+1,z+1],[x,y+1,z]], normal: [-1,0,0],
+        ao: [[[-1,0,-1],[-1,-1,0],[-1,-1,-1]],[[-1,0,2],[-1,-1,1],[-1,-1,2]],[[-1,2,2],[-1,1,1],[-1,1,2]],[[-1,2,-1],[-1,1,0],[-1,1,-1]]],
+      },
+      south: {
+        pos: [[x,y,z+1],[x+1,y,z+1],[x+1,y+1,z+1],[x,y+1,z+1]], normal: [0,0,1],
+        ao: [[[-1,0,1],[0,-1,1],[-1,-1,1]],[[2,0,1],[1,-1,1],[2,-1,1]],[[2,2,1],[1,1,1],[2,1,1]],[[-1,2,1],[0,1,1],[-1,1,1]]],
+      },
+      north: {
+        pos: [[x+1,y,z],[x,y,z],[x,y+1,z],[x+1,y+1,z]], normal: [0,0,-1],
+        ao: [[[2,0,-1],[1,-1,-1],[2,-1,-1]],[[-1,0,-1],[0,-1,-1],[-1,-1,-1]],[[-1,2,-1],[0,1,-1],[-1,1,-1]],[[2,2,-1],[1,1,-1],[2,1,-1]]],
+      },
     };
     const f = faces[face];
     if (!f) return;
-    for (const p of f.pos) {
+    for (let i = 0; i < 4; i++) {
+      const p = f.pos[i];
+      const ao = f.ao[i];
+      const aoVal = this.vertexAO(
+        this.isSolid(x + ao[0][0], y + ao[0][1], z + ao[0][2]),
+        this.isSolid(x + ao[1][0], y + ao[1][1], z + ao[1][2]),
+        this.isSolid(x + ao[2][0], y + ao[2][1], z + ao[2][2])
+      );
       verts.push(p[0], p[1], p[2]);
       norms.push(f.normal[0], f.normal[1], f.normal[2]);
-      cols.push(color[0], color[1], color[2]);
+      // Modulate color by AO
+      const aoFactor = em > 0 ? 1.0 : aoVal; // emissive blocks don't get AO
+      cols.push(color[0] * aoFactor, color[1] * aoFactor, color[2] * aoFactor);
       emis.push(em);
     }
     idx.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
