@@ -73,3 +73,27 @@ Stage Summary:
 - GitHub repo live: https://github.com/vfyov6621-coder/SinCraft
 - Wiki live: https://github.com/vfyov6621-coder/SinCraft/wiki
 - Remaining phases: shadows/lighting improvements, Tailscale integration, more features
+---
+Task ID: 2-3
+Agent: main
+Task: Phase 2 (Shadows/AO) + Phase 3 (Tailscale multiplayer)
+
+Work Log:
+- Phase 2: Implemented proper per-vertex ambient occlusion in world.ts mesh builder
+  - Each face vertex checks 3 neighboring blocks for occlusion
+  - AO formula: if both sides solid → 0.35, else 3-(s1+s2+corner) → mapped to [0.55, 0.7, 0.85, 1.0]
+  - AO offsets defined for all 6 face types × 4 vertices = 24 configurations
+  - Emissive blocks (torches, lava) bypass AO for proper glow effect
+  - Color modulation in mesh builder (no shader changes needed)
+  - Reduced renderer shadowStrength from 0.6 to 0.3 (vertex AO handles main shadows)
+- Phase 3: Tailscale multiplayer integration
+  - Network client (network.ts) accepts directHost parameter for direct WebSocket
+  - Engine (engine.ts) passes directHost through startNetwork()
+  - Page.tsx: multiplayer screen with Tailscale IP input field, port config
+  - Join button disabled until IP entered
+  - Game server: renamed to SinCraft, listens on 0.0.0.0, configurable PORT
+
+Stage Summary:
+- All 3 phases complete and pushed to GitHub
+- 4 commits pushed: inventory/crafting/death/breaking, AO shadows, Tailscale multiplayer
+- Repo: https://github.com/vfyov6621-coder/SinCraft
