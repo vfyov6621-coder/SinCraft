@@ -42,6 +42,13 @@ export enum BlockType {
   // Lighting
   Torch = 90,
   Glowstone = 91,
+  // Building blocks
+  IronBlock = 34,
+  GoldBlock = 35,
+  DiamondBlock = 36,
+  CraftTable = 37,
+  FurnaceBlock = 38,
+  Bookshelf = 39,
   // Decorative
   WoolWhite = 100,
   WoolRed = 101,
@@ -223,6 +230,31 @@ export const BLOCK_COLORS: Record<number, BlockDef> = {
     top: [0.15, 0.15, 0.15], side: [0.12, 0.12, 0.12], bottom: [0.10, 0.10, 0.10],
     solid: true, transparent: false, emissive: 0, name: 'Black Wool', hardness: 3,
   },
+  // Building blocks
+  [BlockType.IronBlock]: {
+    top: [0.75, 0.76, 0.78], side: [0.70, 0.71, 0.73], bottom: [0.65, 0.66, 0.68],
+    solid: true, transparent: false, emissive: 0, name: 'Iron Block', hardness: 8,
+  },
+  [BlockType.GoldBlock]: {
+    top: [0.85, 0.75, 0.20], side: [0.80, 0.70, 0.18], bottom: [0.75, 0.65, 0.15],
+    solid: true, transparent: false, emissive: 0, name: 'Gold Block', hardness: 8,
+  },
+  [BlockType.DiamondBlock]: {
+    top: [0.40, 0.85, 0.90], side: [0.38, 0.80, 0.85], bottom: [0.35, 0.75, 0.80],
+    solid: true, transparent: false, emissive: 0, name: 'Diamond Block', hardness: 10,
+  },
+  [BlockType.CraftTable]: {
+    top: [0.60, 0.45, 0.25], side: [0.55, 0.35, 0.15], bottom: [0.50, 0.40, 0.28],
+    solid: true, transparent: false, emissive: 0, name: 'Crafting Table', hardness: 4,
+  },
+  [BlockType.FurnaceBlock]: {
+    top: [0.50, 0.50, 0.50], side: [0.42, 0.42, 0.42], bottom: [0.45, 0.45, 0.45],
+    solid: true, transparent: false, emissive: 0, name: 'Furnace', hardness: 6,
+  },
+  [BlockType.Bookshelf]: {
+    top: [0.60, 0.45, 0.25], side: [0.55, 0.38, 0.18], bottom: [0.50, 0.40, 0.28],
+    solid: true, transparent: false, emissive: 0, name: 'Bookshelf', hardness: 3,
+  },
 };
 
 // Hotbar blocks for creative mode
@@ -270,6 +302,18 @@ export const CRAFTING_RECIPES: CraftingRecipe[] = [
   { result: BlockType.Torch, count: 4, ingredients: [{ block: BlockType.OakPlanks, count: 1 }, { block: BlockType.CoalOre, count: 1 }] },
   // Wool
   { result: BlockType.WoolWhite, count: 1, ingredients: [{ block: BlockType.Wheat, count: 2 }] },
+  // CraftTable
+  { result: BlockType.CraftTable, count: 1, ingredients: [{ block: BlockType.OakPlanks, count: 4 }] },
+  // Furnace
+  { result: BlockType.FurnaceBlock, count: 1, ingredients: [{ block: BlockType.Cobblestone, count: 8 }] },
+  // Bookshelf
+  { result: BlockType.Bookshelf, count: 1, ingredients: [{ block: BlockType.OakPlanks, count: 6 }] },
+  // Iron Block
+  { result: BlockType.IronBlock, count: 1, ingredients: [{ block: BlockType.IronOre, count: 9 }] },
+  // Gold Block
+  { result: BlockType.GoldBlock, count: 1, ingredients: [{ block: BlockType.GoldOre, count: 9 }] },
+  // Diamond Block
+  { result: BlockType.DiamondBlock, count: 1, ingredients: [{ block: BlockType.DiamondOre, count: 9 }] },
 ];
 
 // ==========================================

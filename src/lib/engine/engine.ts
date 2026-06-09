@@ -21,6 +21,9 @@ export interface GameCallbacks {
   onHealthUpdate: (health: number, hunger: number) => void;
   onInventoryUpdate: (inventory: ItemStack[]) => void;
   onDeath: () => void;
+  onBreakingProgress: (progress: number, maxProgress: number) => void;
+  onInventoryToggle: (open: boolean) => void;
+  onBlockLookAt: (name: string) => void;
 }
 
 export interface GameStats {
@@ -28,6 +31,7 @@ export interface GameStats {
   flying: boolean;
   health: number;
   hunger: number;
+  position: { x: number; y: number; z: number };
 }
 
 export class Game {
@@ -60,6 +64,13 @@ export class Game {
   callbacks: GameCallbacks;
   private contextLost = false;
 
+  // Breaking system
+  private breakingProgress = 0;
+  private breakingHardness = 1;
+  private mouseHeld = false;
+  private currentBreakKey = '';
+  isInventoryOpen = false;
+
   // Inventory
   inventory: ItemStack[] = createInventory();
 
@@ -79,6 +90,9 @@ export class Game {
       onHealthUpdate: () => {},
       onInventoryUpdate: () => {},
       onDeath: () => {},
+      onBreakingProgress: () => {},
+      onInventoryToggle: () => {},
+      onBlockLookAt: () => {},
     };
   }
 
@@ -291,6 +305,7 @@ export class Game {
     document.addEventListener('keyup', this.onKeyUp);
     document.addEventListener('mousemove', this.onMouseMove);
     document.addEventListener('mousedown', this.onMouseDown);
+    document.addEventListener('mouseup', this.onMouseUp);
     document.addEventListener('wheel', this.onWheel);
     this.canvas.addEventListener('click', this.onCanvasClick);
     this.canvas.addEventListener('contextmenu', this.onCanvasContextMenu);
@@ -324,7 +339,13 @@ export class Game {
         e.preventDefault();
         break;
       case 'KeyE':
-        // Toggle inventory (not implemented yet)
+        this.isInventoryOpen = !this.isInventoryOpen;
+        this.callbacks.onInventoryToggle(this.isInventoryOpen);
+        if (this.isInventoryOpen) {
+          document.exitPointerLock();
+        } else {
+          this.canvas.requestPointerLock();
+        }
         e.preventDefault();
         break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
@@ -355,10 +376,37 @@ export class Game {
   };
 
   private onMouseDown = (e: MouseEvent) => {
-    if (document.pointerLockElement !== this.canvas || this.paused) return;
-    if (e.button === 0) this.removeBlock();
-    if (e.button === 2) this.placeBlock();
+    if (document.pointerLockElement !== this.canvas || this.paused || this.isInventoryOpen) return;
+    if (e.button === 0) {
+      this.mouseHeld = true;
+      this.breakingProgress = 0;
+      this.currentBreakKey = '';
+    }
+    if (e.button === 2) this.handleRightClick();
   };
+
+  private onMouseUp = (e: MouseEvent) => {
+    if (e.button === 0) {
+      this.mouseHeld = false;
+      this.breakingProgress = 0;
+      this.currentBreakKey = '';
+      this.callbacks.onBreakingProgress(0, 1);
+    }
+  };
+
+  private handleRightClick() {
+    if (!this.targetBlock) return;
+    const hotbarItem = this.inventory[this.selectedSlot];
+    // Food eating
+    if (hotbarItem.block === BlockType.Wheat || hotbarItem.block === BlockType.OakLeaves) {
+      this.player.hunger = Math.min(this.player.maxHunger, this.player.hunger + 3);
+      this.player.heal(1);
+      removeFromInventory(this.inventory, hotbarItem.block, 1);
+      this.callbacks.onInventoryUpdate([...this.inventory]);
+      return;
+    }
+    this.placeBlock();
+  }
 
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
@@ -373,6 +421,7 @@ export class Game {
     document.removeEventListener('keyup', this.onKeyUp);
     document.removeEventListener('mousemove', this.onMouseMove);
     document.removeEventListener('mousedown', this.onMouseDown);
+    document.removeEventListener('mouseup', this.onMouseUp);
     document.removeEventListener('wheel', this.onWheel);
     this.canvas.removeEventListener('click', this.onCanvasClick);
     this.canvas.removeEventListener('contextmenu', this.onCanvasContextMenu);
@@ -420,7 +469,32 @@ export class Game {
 
       this.rebuildDirtyChunks();
 
-      if (!this.paused && !this.contextLost) {
+      if (!this.paused && !this.contextLost && !this.isInventoryOpen) {
+        // Breaking progress
+        if (this.mouseHeld && this.targetBlock) {
+          const { x, y, z } = this.targetBlock;
+          const key = `${x},${y},${z}`;
+          if (this.currentBreakKey !== key) {
+            this.currentBreakKey = key;
+            this.breakingProgress = 0;
+            const bt = this.world.getBlock(x, y, z);
+            const bd = BLOCK_COLORS[bt];
+            this.breakingHardness = bd ? Math.max(0.1, (bd.hardness || 1) * 0.35) : 0.3;
+          }
+          this.breakingProgress += dt;
+          this.callbacks.onBreakingProgress(this.breakingProgress, this.breakingHardness);
+          if (this.breakingProgress >= this.breakingHardness) {
+            this.removeBlock();
+            this.breakingProgress = 0;
+            this.currentBreakKey = '';
+            this.callbacks.onBreakingProgress(0, 1);
+          }
+        } else if (this.breakingProgress > 0) {
+          this.breakingProgress = 0;
+          this.currentBreakKey = '';
+          this.callbacks.onBreakingProgress(0, 1);
+        }
+
         this.player.update(dt, this.world);
 
         // Survival: hunger drain
@@ -446,7 +520,19 @@ export class Game {
 
         // Check death
         if (this.player.health <= 0) {
+          this.paused = true;
+          document.exitPointerLock();
           this.callbacks.onDeath();
+        }
+
+        // Block look-at name
+        if (this.targetBlock) {
+          const bt = this.world.getBlock(this.targetBlock.x, this.targetBlock.y, this.targetBlock.z);
+          const bd = BLOCK_COLORS[bt];
+          if (bd) this.callbacks.onBlockLookAt(bd.name);
+          else this.callbacks.onBlockLookAt('');
+        } else {
+          this.callbacks.onBlockLookAt('');
         }
 
         // Update health/hunger UI
@@ -517,6 +603,7 @@ export class Game {
         flying: this.player.flying,
         health: this.player.health,
         hunger: this.player.hunger,
+        position: { x: this.player.x, y: this.player.y, z: this.player.z },
       });
 
       this.errorCount = 0;
