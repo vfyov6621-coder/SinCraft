@@ -97,3 +97,40 @@ Stage Summary:
 - All 3 phases complete and pushed to GitHub
 - 4 commits pushed: inventory/crafting/death/breaking, AO shadows, Tailscale multiplayer
 - Repo: https://github.com/vfyov6621-coder/SinCraft
+---
+Task ID: 1
+Agent: Main Agent
+Task: Fix crafting phantom blocks, leaves eating, UI freeze, LMB/RMB separation
+
+Work Log:
+- Fixed crafting bug: checkCraftingGrid returned ItemStack, but handleCraftResult tried to access .ingredients on it (undefined). Created findCraftingRecipe() that returns {result, needed}. Now ingredients are properly consumed from craft grid.
+- Fixed leaves as food: Removed OakLeaves from food check in handleRightClick(). Only Wheat is food now.
+- Fixed leaves dropping items: Added isLeaf check in removeBlock(). Leaves now break instantly but drop nothing to inventory.
+- Fixed UI freeze: Added throttle system for stats updates. onStatsUpdate throttled to 100ms, onHealthUpdate to 250ms. Removed duplicate onHealthUpdate call from survival section.
+- LMB/RMB already separated: LMB = break (hold), RMB = place/eat. The leaves-eating bug was causing the confusion.
+
+Stage Summary:
+- All 4 bugs fixed and verified with clean build
+- Files modified: engine.ts, page.tsx
+---
+Task ID: 2
+Agent: full-stack-developer
+Task: Convert SinCraft to Electron desktop app with embedded Tailscale
+
+Work Log:
+- Created electron/main.js: Frameless BrowserWindow, loads static export, IPC handlers for Tailscale/server/window, system tray
+- Created electron/preload.js: contextBridge with electronAPI (tailscale, server, window, app namespaces)
+- Created electron/tailscale.js: CLI wrapper for tailscale status/ip/peers
+- Created electron/game-server-node.js: Node.js WebSocket server (ws package) equivalent of Bun server
+- Modified package.json: name=sincraft, main=electron/main.js, added electron scripts and build config
+- Modified next.config.ts: output=export for static HTML
+- Modified page.tsx: Added isElectron detection, Tailscale status UI, embedded server controls, window controls
+- Modified layout.tsx: Switched to CDN fonts for static export compat
+- Modified globals.css: Added frameless window drag classes
+
+Stage Summary:
+- SinCraft is now a standalone Electron desktop app
+- Static export in out/ directory
+- Build commands: npm run electron, npm run electron:build
+- electron-builder config for Windows NSIS installer
+

@@ -52,6 +52,13 @@ export class Game {
   private errorCount = 0;
   private maxErrors = 10;
 
+  // Throttle for UI updates
+  private lastStatsUpdate = 0;
+  private lastHealthUpdate = 0;
+  private statsUpdateInterval = 0.1; // 100ms
+  private healthUpdateInterval = 0.25; // 250ms
+  private cachedStats: GameStats = { fps: 0, flying: false, health: 20, hunger: 20, position: { x: 0, y: 0, z: 0 } };
+
   renderDistance = 10;
   maxFps = 0;
   private lastRenderTime = 0;
@@ -262,11 +269,14 @@ export class Game {
     const blockType = this.world.getBlock(x, y, z);
     const bd = BLOCK_COLORS[blockType];
 
+    // Leaves: instant break, drop nothing
+    const isLeaf = blockType === BlockType.OakLeaves || blockType === BlockType.BirchLeaves || blockType === BlockType.SpruceLeaves;
+
     this.world.setBlock(x, y, z, BlockType.Air);
     this.rebuildDirtyChunks();
 
-    // Drop item to inventory (in survival, bedrock can't be broken)
-    if (bd && bd.hardness < 100) {
+    // Drop item to inventory (in survival, bedrock/lava can't be broken, leaves drop nothing)
+    if (bd && bd.hardness < 100 && !isLeaf) {
       const dropType = bd.drops ?? blockType;
       addToInventory(this.inventory, dropType, 1);
       this.callbacks.onInventoryUpdate([...this.inventory]);
@@ -400,8 +410,8 @@ export class Game {
   private handleRightClick() {
     if (!this.targetBlock) return;
     const hotbarItem = this.inventory[this.selectedSlot];
-    // Food eating
-    if (hotbarItem.block === BlockType.Wheat || hotbarItem.block === BlockType.OakLeaves) {
+    // Food eating (Wheat only - leaves are NOT food)
+    if (hotbarItem.count > 0 && hotbarItem.block === BlockType.Wheat) {
       this.player.hunger = Math.min(this.player.maxHunger, this.player.hunger + 3);
       this.player.heal(1);
       removeFromInventory(this.inventory, hotbarItem.block, 1);
@@ -538,8 +548,6 @@ export class Game {
           this.callbacks.onBlockLookAt('');
         }
 
-        // Update health/hunger UI
-        this.callbacks.onHealthUpdate(this.player.health, this.player.hunger);
       }
 
       // FPS cap
@@ -601,13 +609,22 @@ export class Game {
         this.renderer.renderHighlight({ x: this.targetBlock.x, y: this.targetBlock.y, z: this.targetBlock.z });
       }
 
-      this.callbacks.onStatsUpdate({
-        fps: this.currentFps,
-        flying: this.player.flying,
-        health: this.player.health,
-        hunger: this.player.hunger,
-        position: { x: this.player.x, y: this.player.y, z: this.player.z },
-      });
+      // Update stats (throttled to ~10fps)
+      const statsNow = performance.now();
+      this.cachedStats.fps = this.currentFps;
+      this.cachedStats.flying = this.player.flying;
+      this.cachedStats.health = this.player.health;
+      this.cachedStats.hunger = this.player.hunger;
+      this.cachedStats.position = { x: this.player.x, y: this.player.y, z: this.player.z };
+      if (statsNow - this.lastStatsUpdate >= this.statsUpdateInterval * 1000) {
+        this.callbacks.onStatsUpdate({ ...this.cachedStats });
+        this.lastStatsUpdate = statsNow;
+      }
+      // Health/hunger separate throttle
+      if (statsNow - this.lastHealthUpdate >= this.healthUpdateInterval * 1000) {
+        this.callbacks.onHealthUpdate(this.player.health, this.player.hunger);
+        this.lastHealthUpdate = statsNow;
+      }
 
       this.errorCount = 0;
     } catch (err) {

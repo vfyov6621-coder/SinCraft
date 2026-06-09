@@ -1,16 +1,23 @@
 {
-  "name": "nextjs_tailwind_shadcn_ts",
-  "version": "0.2.0",
+  "name": "sincraft",
+  "version": "2.0.0",
   "private": true,
+  "description": "SinCraft — Voxel sandbox game with Tailscale multiplayer",
+  "main": "electron/main.js",
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
+    "build": "next build",
+    "build:electron": "next build",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
     "lint": "eslint .",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset"
+    "db:reset": "prisma migrate reset",
+    "electron": "npm run build:electron && electron .",
+    "electron:dev": "electron .",
+    "electron:pack": "npm run build:electron && electron-builder --dir",
+    "electron:build": "npm run build:electron && electron-builder"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -76,6 +83,7 @@
     "tailwindcss-animate": "^1.0.7",
     "uuid": "^11.1.0",
     "vaul": "^1.1.2",
+    "ws": "^8.18.0",
     "z-ai-web-dev-sdk": "^0.0.17",
     "zod": "^4.0.2",
     "zustand": "^5.0.6"
@@ -84,11 +92,61 @@
     "@tailwindcss/postcss": "^4",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/ws": "^8.5.13",
     "bun-types": "^1.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "eslint": "^9",
     "eslint-config-next": "^16.1.1",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5"
+  },
+  "build": {
+    "appId": "com.sincraft.voxel",
+    "productName": "SinCraft",
+    "directories": {
+      "output": "dist-electron"
+    },
+    "files": [
+      "electron/**/*",
+      "out/**/*",
+      "public/**/*",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "out",
+        "to": "app"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "public/icon.png",
+      "artifactName": "SinCraft-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/icon.png",
+      "uninstallerIcon": "public/icon.png",
+      "createDesktopShortcut": true,
+      "shortcutName": "SinCraft",
+      "perMachine": false,
+      "allowElevation": true
+    },
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.games"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Game"
+    }
   }
 }

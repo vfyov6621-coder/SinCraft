@@ -1,6 +1,39 @@
 'use client';
 
 import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+
+// Electron API type (available when running in Electron)
+declare global {
+  interface Window {
+    electronAPI?: {
+      isElectron: boolean;
+      platform: string;
+      tailscale: {
+        isInstalled: () => Promise<boolean>;
+        getStatus: () => Promise<any>;
+        getIP: () => Promise<string | null>;
+        getPeers: () => Promise<any[]>;
+      };
+      server: {
+        start: (port: number) => Promise<any>;
+        stop: () => Promise<any>;
+        getStatus: () => Promise<{ running: boolean; port: number }>;
+      };
+      window: {
+        minimize: () => Promise<void>;
+        maximize: () => Promise<void>;
+        close: () => Promise<void>;
+        isMaximized: () => Promise<boolean>;
+      };
+      app: {
+        getVersion: () => Promise<string>;
+        quit: () => Promise<void>;
+      };
+    };
+  }
+}
+
+const isElectron = typeof window !== 'undefined' && !!(window as any).electronAPI?.isElectron;
 import { Game, GameStats } from '@/lib/engine/engine';
 import { BlockType, HOTBAR_BLOCKS, BLOCK_COLORS, BLOCK_NAMES, ItemStack, CRAFTING_RECIPES, removeFromInventory, addToInventory, hasItems, createInventory } from '@/lib/engine/blocks';
 import { WorldSettings, defaultSettings } from '@/lib/engine/world';
@@ -66,7 +99,7 @@ const BLOCK_COLOR_MAP: Record<number, string> = {
 };
 
 // Crafting grid helper: check if 2x2 grid matches a recipe
-function checkCraftingGrid(grid: (ItemStack | null)[]): ItemStack | null {
+function findCraftingRecipe(grid: (ItemStack | null)[]): { result: ItemStack; needed: { block: BlockType; count: number }[] } | null {
   // Collect non-empty slots
   const ingredients: { block: BlockType; count: number }[] = [];
   for (const slot of grid) {
@@ -86,9 +119,13 @@ function checkCraftingGrid(grid: (ItemStack | null)[]): ItemStack | null {
       const found = ingredients.find(i => i.block === ing.block && i.count >= ing.count);
       if (!found) { match = false; break; }
     }
-    if (match) return { block: recipe.result, count: recipe.count };
+    if (match) return { result: { block: recipe.result, count: recipe.count }, needed: recipe.ingredients };
   }
   return null;
+}
+
+function checkCraftingGrid(grid: (ItemStack | null)[]): ItemStack | null {
+  return findCraftingRecipe(grid)?.result ?? null;
 }
 
 // Slot component for inventory
@@ -162,6 +199,52 @@ export default function Home() {
   // Current world
   const [currentWorldId, setCurrentWorldId] = useState<string | null>(null);
   const [currentWorldName, setCurrentWorldName] = useState('Новый мир');
+
+  // Electron / Tailscale state
+  const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
+  const [tsStatus, setTsStatus] = useState<any>(null);
+  const [tsIP, setTsIP] = useState<string | null>(null);
+  const [tsPeers, setTsPeers] = useState<any[]>([]);
+  const [serverRunning, setServerRunning] = useState(false);
+  const [serverPort, setServerPort] = useState(3003);
+
+  // Fetch Tailscale status when on Electron
+  useEffect(() => {
+    if (!isElectron || !window.electronAPI) return;
+    const api = window.electronAPI;
+    // Check installation
+    api.tailscale.isInstalled().then(setTsInstalled);
+    // Get status
+    api.tailscale.getStatus().then((s) => { setTsStatus(s); if (s?.self?.ip) setTsIP(s.self.ip); });
+    // Get IP
+    api.tailscale.getIP().then((ip) => { if (ip) setTsIP(ip); });
+    // Get peers
+    api.tailscale.getPeers().then(setTsPeers);
+    // Poll server status
+    api.server.getStatus().then((s) => { setServerRunning(s.running); setServerPort(s.port); });
+  }, []);
+
+  // Electron window controls
+  const handleMinimize = useCallback(() => { window.electronAPI?.window.minimize(); }, []);
+  const handleMaximize = useCallback(() => { window.electronAPI?.window.maximize(); }, []);
+  const handleClose = useCallback(() => { window.electronAPI?.window.close(); }, []);
+  const handleAppQuit = useCallback(() => { window.electronAPI?.app.quit(); }, []);
+  const refreshTailscale = useCallback(() => {
+    if (!isElectron || !window.electronAPI) return;
+    window.electronAPI.tailscale.getStatus().then((s) => { setTsStatus(s); if (s?.self?.ip) setTsIP(s.self.ip); });
+    window.electronAPI.tailscale.getIP().then((ip) => { if (ip) setTsIP(ip); });
+    window.electronAPI.tailscale.getPeers().then(setTsPeers);
+  }, []);
+  const startEmbeddedServer = useCallback(async (port: number) => {
+    if (!isElectron || !window.electronAPI) return;
+    const result = await window.electronAPI.server.start(port);
+    if (result.success) { setServerRunning(true); setServerPort(port); }
+  }, []);
+  const stopEmbeddedServer = useCallback(async () => {
+    if (!isElectron || !window.electronAPI) return;
+    await window.electronAPI.server.stop();
+    setServerRunning(false);
+  }, []);
 
   const refreshWorlds = useCallback(() => setSavedWorlds(getSavedWorlds()), []);
 
@@ -296,10 +379,16 @@ export default function Home() {
     refreshWorlds(); setScreen('menu');
   }, [manualSave, refreshWorlds]);
 
-  const hostGame = useCallback(() => {
+  const hostGame = useCallback(async () => {
     localStorage.setItem('sincraft_name', playerName);
     localStorage.setItem('sincraft_color', playerColor);
     if (!gameRef.current) return;
+    // In Electron: start embedded server first
+    if (isElectron && window.electronAPI) {
+      const result = await window.electronAPI.server.start(lanPort);
+      if (!result.success) { console.error('Failed to start embedded server'); return; }
+      setServerRunning(true); setServerPort(lanPort);
+    }
     gameRef.current.hostNetwork(generateId(), playerName, playerColor, lanPort);
     setIsMultiplayer(true); setIsHost(true);
   }, [playerName, playerColor, lanPort]);
@@ -392,20 +481,16 @@ export default function Home() {
 
   // Craft result handler
   const handleCraftResult = useCallback(() => {
-    const result = checkCraftingGrid(craftGrid);
-    if (!result || !gameRef.current) return;
+    const recipe = findCraftingRecipe(craftGrid);
+    if (!recipe || !gameRef.current) return;
+    const { result, needed } = recipe;
 
     // Consume ingredients from craft grid
-    const grid = [...craftGrid];
-    const needed: Record<number, number> = {};
-    for (const ing of (checkCraftingGrid(craftGrid)?.ingredients || [])) {
-      needed[ing.block] = (needed[ing.block] || 0) + ing.count;
-    }
-    for (const [blockStr, count] of Object.entries(needed)) {
-      const block = Number(blockStr) as BlockType;
-      let remaining = count;
+    const grid = craftGrid.map(s => s ? { ...s } : null);
+    for (const ing of needed) {
+      let remaining = ing.count;
       for (let i = 0; i < grid.length && remaining > 0; i++) {
-        if (grid[i] && grid[i].block === block) {
+        if (grid[i] && grid[i].block === ing.block && grid[i].count > 0) {
           const take = Math.min(remaining, grid[i].count);
           grid[i].count -= take;
           remaining -= take;
@@ -418,9 +503,6 @@ export default function Home() {
     // Add result to inventory or held item
     if (heldItem && heldItem.block === result.block && heldItem.count + result.count <= 64) {
       setHeldItem({ ...heldItem, count: heldItem.count + result.count });
-    } else if (heldItem) {
-      addToInventory(gameRef.current.inventory, result.block, result.count);
-      gameRef.current.callbacks.onInventoryUpdate([...gameRef.current.inventory]);
     } else {
       addToInventory(gameRef.current.inventory, result.block, result.count);
       gameRef.current.callbacks.onInventoryUpdate([...gameRef.current.inventory]);
@@ -436,10 +518,24 @@ export default function Home() {
     <div className="flex flex-col items-center justify-center h-screen bg-[#0a0e17] text-gray-100 select-none relative overflow-hidden">
       <div className="absolute inset-0 bg-gradient-to-b from-emerald-950/30 via-transparent to-transparent" />
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,rgba(16,185,129,0.08),transparent_70%)]" />
+
+      {/* Electron frameless window title bar drag region */}
+      {isElectron && (
+        <div className="absolute top-0 left-0 right-0 h-8 z-50 flex items-center justify-between app-region-drag">
+          <div className="flex-1" />
+          <div className="flex items-center gap-1 app-region-no-drag mr-1 mt-0.5">
+            <button onClick={handleMinimize} className="w-6 h-6 rounded flex items-center justify-center hover:bg-white/10 transition-colors"><X className="w-3 h-3" /></button>
+            <button onClick={handleMaximize} className="w-6 h-6 rounded flex items-center justify-center hover:bg-white/10 transition-colors"><ChevronRight className="w-3 h-3" /></button>
+            <button onClick={handleClose} className="w-6 h-6 rounded flex items-center justify-center hover:bg-red-500/30 transition-colors"><X className="w-3 h-3 text-red-400" /></button>
+          </div>
+        </div>
+      )}
+
       <div className="w-full max-w-xs space-y-5 p-6 relative z-10">
         <div className="text-center space-y-2">
           <img src="/logo.svg" alt="SinCraft" className="h-16 mx-auto drop-shadow-lg" />
           <p className="text-gray-500 text-[10px] tracking-[0.3em] uppercase font-light">Voxel Engine v2.0</p>
+          {isElectron && <span className="text-[8px] text-emerald-600/60 uppercase tracking-widest">Desktop Edition</span>}
         </div>
         <div className="space-y-2">
           <Button onClick={() => { refreshWorlds(); setScreen('worlds'); }} className="w-full h-12 text-base bg-emerald-600 hover:bg-emerald-500 gap-2 rounded-xl font-semibold shadow-lg shadow-emerald-900/30 transition-all">
@@ -606,24 +702,88 @@ export default function Home() {
 
   // ==================== MULTIPLAYER ====================
   if (screen === 'multiplayer') return (
-    <div className="flex flex-col items-center justify-center h-screen bg-[#0a0e17] text-gray-100 select-none">
+    <div className="flex flex-col items-center justify-center h-screen bg-[#0a0e17] text-gray-100 select-none overflow-y-auto">
       <div className="w-full max-w-sm space-y-4 p-6">
         <div className="flex items-center gap-2 mb-4">
           <button onClick={() => setScreen('menu')} className="text-gray-500 hover:text-gray-300 transition-colors"><ArrowLeft className="w-5 h-5" /></button>
           <h2 className="text-xl font-bold flex-1">Сетевая игра</h2>
         </div>
-        <div className="bg-gray-900/50 rounded-xl p-4 border border-gray-800/50 space-y-3">
-          <div className="flex items-center gap-2">
-            <Wifi className="w-4 h-4 text-emerald-400" />
-            <p className="text-xs text-gray-400">Для игры по сети используйте <span className="text-emerald-400 font-semibold">Tailscale</span></p>
+
+        {/* Tailscale Status Card — Electron only */}
+        {isElectron && (
+          <div className="bg-gray-900/50 rounded-xl p-4 border border-gray-800/50 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Wifi className="w-4 h-4 text-emerald-400" />
+                <p className="text-xs text-gray-300 font-semibold">Tailscale</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${tsStatus?.connected ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : tsInstalled === false ? 'bg-red-500' : 'bg-yellow-400 animate-pulse'}`} />
+                <span className="text-[10px] text-gray-500">
+                  {tsStatus?.connected ? 'Подключён' : tsInstalled === false ? 'Не установлен' : 'Проверка...'}
+                </span>
+              </div>
+            </div>
+            {tsStatus?.connected && (
+              <div className="bg-emerald-950/30 rounded-lg p-2.5 space-y-1">
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-gray-500">Ваш IP:</span>
+                  <span className="text-emerald-400 font-mono">{tsIP || tsStatus?.self?.ip || '—'}</span>
+                </div>
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-gray-500">Сеть:</span>
+                  <span className="text-gray-300">{tsStatus?.tailnet || '—'}</span>
+                </div>
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-gray-500">Устройство:</span>
+                  <span className="text-gray-300">{tsStatus?.self?.hostname || '—'}</span>
+                </div>
+              </div>
+            )}
+            {tsInstalled === false && (
+              <div className="bg-yellow-950/30 rounded-lg p-2.5 text-[10px] text-yellow-500/70 space-y-1">
+                <p>Tailscale не найден. Установите на tailscale.com для сетевой игры.</p>
+              </div>
+            )}
+            {/* Peers list */}
+            {tsPeers.length > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-[10px] text-gray-500 font-semibold uppercase tracking-wide">Доступные узлы ({tsPeers.length})</p>
+                <div className="max-h-32 overflow-y-auto space-y-1">
+                  {tsPeers.filter(p => p.online).map((p) => (
+                    <button key={p.id} onClick={() => setDirectHost(p.ip)} className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-left transition-all ${directHost === p.ip ? 'bg-emerald-950/50 border border-emerald-500/50' : 'bg-gray-900/50 border border-gray-800/50 hover:border-gray-600'}`}>
+                      <div className={`w-2 h-2 rounded-full shrink-0 ${p.online ? 'bg-emerald-400' : 'bg-gray-600'}`} />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[11px] text-gray-300 truncate">{p.hostname || p.dnsName || 'Unknown'}</p>
+                      </div>
+                      <span className="text-[10px] text-emerald-400 font-mono shrink-0">{p.ip}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <button onClick={refreshTailscale} className="w-full text-[10px] text-gray-500 hover:text-gray-300 transition-colors py-1">
+              ↻ Обновить статус
+            </button>
           </div>
-          <div className="bg-emerald-950/30 rounded-lg p-2.5 text-[10px] text-emerald-400/70 space-y-1">
-            <p><span className="text-emerald-400 font-semibold">1.</span> Установите Tailscale на tailscale.com</p>
-            <p><span className="text-emerald-400 font-semibold">2.</span> Авторизуйтесь и подключитесь к сети</p>
-            <p><span className="text-emerald-400 font-semibold">3.</span> Хост: создайте мир, нажмите «Открыть сервер» в паузе</p>
-            <p><span className="text-emerald-400 font-semibold">4.</span> Гость: введите Tailscale IP хоста и подключитесь</p>
+        )}
+
+        {/* Browser fallback instructions */}
+        {!isElectron && (
+          <div className="bg-gray-900/50 rounded-xl p-4 border border-gray-800/50 space-y-3">
+            <div className="flex items-center gap-2">
+              <Wifi className="w-4 h-4 text-emerald-400" />
+              <p className="text-xs text-gray-400">Для игры по сети используйте <span className="text-emerald-400 font-semibold">Tailscale</span></p>
+            </div>
+            <div className="bg-emerald-950/30 rounded-lg p-2.5 text-[10px] text-emerald-400/70 space-y-1">
+              <p><span className="text-emerald-400 font-semibold">1.</span> Установите Tailscale на tailscale.com</p>
+              <p><span className="text-emerald-400 font-semibold">2.</span> Авторизуйтесь и подключитесь к сети</p>
+              <p><span className="text-emerald-400 font-semibold">3.</span> Хост: создайте мир, нажмите «Открыть сервер» в паузе</p>
+              <p><span className="text-emerald-400 font-semibold">4.</span> Гость: введите Tailscale IP хоста и подключитесь</p>
+            </div>
           </div>
-        </div>
+        )}
+
         <div className="space-y-3">
           <Input value={playerName} onChange={e => setPlayerName(e.target.value)} className="bg-gray-900/60 border-gray-700/50 rounded-lg h-10" maxLength={16} placeholder="Имя" />
           <div className="flex items-center justify-center gap-2">
@@ -634,9 +794,11 @@ export default function Home() {
             <Input value={lanPort} onChange={e => setLanPort(parseInt(e.target.value) || 3003)} type="number" className="bg-gray-900/60 border-gray-700/50 rounded-lg h-10" />
           </div>
           <div>
-            <label className="text-xs text-gray-500 mb-1 block">Tailscale IP хоста</label>
-            <Input value={directHost} onChange={e => setDirectHost(e.target.value)} placeholder="100.x.x.x" className="bg-gray-900/60 border-gray-700/50 rounded-lg h-10" />
-            <p className="text-[9px] text-gray-600 mt-0.5">Оставьте пустым для подключения через прокси</p>
+            <label className="text-xs text-gray-500 mb-1 block">{isElectron ? 'IP хоста (Tailscale / LAN)' : 'Tailscale IP хоста'}</label>
+            <Input value={directHost} onChange={e => setDirectHost(e.target.value)} placeholder={isElectron ? '100.x.x.x или 192.168.x.x' : '100.x.x.x'} className="bg-gray-900/60 border-gray-700/50 rounded-lg h-10" />
+            {isElectron && tsIP && (
+              <p className="text-[9px] text-gray-600 mt-0.5">Ваш IP: <span className="text-emerald-500/70 font-mono">{tsIP}:{lanPort}</span></p>
+            )}
           </div>
         </div>
         <Separator className="bg-gray-800/50" />
@@ -923,7 +1085,20 @@ export default function Home() {
                 </div>
 
                 {!isMultiplayer && (
-                  <Button onClick={hostGame} variant="outline" className="w-full border-gray-700/60 gap-2 h-10 rounded-xl"><Wifi className="w-4 h-4" /> Открыть сервер</Button>
+                  <Button onClick={hostGame} variant="outline" className="w-full border-gray-700/60 gap-2 h-10 rounded-xl">
+                    <Wifi className="w-4 h-4" /> Открыть сервер
+                  </Button>
+                )}
+                {isMultiplayer && isHost && (
+                  <div className="bg-emerald-950/30 rounded-lg p-2 space-y-1">
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                      <span className="text-[10px] text-emerald-400">Сервер работает</span>
+                    </div>
+                    {isElectron && tsIP && (
+                      <p className="text-[10px] text-gray-500">IP: <span className="text-emerald-400/70 font-mono">{tsIP}:{lanPort}</span></p>
+                    )}
+                  </div>
                 )}
 
                 <Separator className="bg-gray-800/50" />
