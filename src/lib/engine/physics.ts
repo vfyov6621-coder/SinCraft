@@ -1,6 +1,7 @@
 // ==========================================
-// Player Physics - gravity, jumping, AABB collision
-// Supports flight mode (double-space toggle)
+// SinCraft - Player Physics
+// Walking, sprinting, flying, AABB collision
+// Survival: health, hunger, fall damage
 // ==========================================
 
 import { VoxelWorld } from './world';
@@ -9,36 +10,54 @@ export class PlayerPhysics {
   x = 16; y = 20; z = 16;
   vx = 0; vy = 0; vz = 0;
 
-  moveSpeed = 5.0;
-  flySpeed = 8.0;
+  moveSpeed = 4.3;
+  sprintSpeed = 6.0;
+  flySpeed = 10.0;
   jumpSpeed = 7.5;
-  gravity = -20;
-  terminalVel = -30;
+  gravity = -22;
+  terminalVel = -40;
   eyeHeight = 1.62;
   width = 0.3;
-  height = 1.7;
+  height = 1.8;
 
   onGround = false;
   yaw = 0;
   pitch = 0;
 
+  // Movement flags
   moveForward = false;
   moveBackward = false;
   moveLeft = false;
   moveRight = false;
   wantJump = false;
-  wantSneak = false; // shift key
+  wantSneak = false;
+  wantSprint = false;
 
-  // Flight mode
+  // Flying
   flying = false;
-  private lastSpacePress = 0;
-  private spaceJustPressed = false;
+  flyHeld = false; // space held down in flying mode
 
-  // Callback for flight toggle notification
-  onFlightToggle?: (flying: boolean) => void;
+  // Survival
+  health = 20;
+  maxHealth = 20;
+  hunger = 20;
+  maxHunger = 20;
+  lastFallY = 0; // track fall start Y for fall damage
+  inWater = false;
+
+  // Damage cooldown
+  damageCooldown = 0;
+  hurtTimer = 0; // red flash
 
   update(dt: number, world: VoxelWorld) {
     dt = Math.min(dt, 0.05);
+
+    // Cooldowns
+    if (this.damageCooldown > 0) this.damageCooldown -= dt;
+    if (this.hurtTimer > 0) this.hurtTimer -= dt;
+
+    // Check if in water
+    this.inWater = this.isInWater(world);
 
     if (this.flying) {
       this.updateFlying(dt, world);
@@ -46,90 +65,126 @@ export class PlayerPhysics {
       this.updateWalking(dt, world);
     }
 
-    // Clamp to world bounds
+    // Hunger drain (slow, ~1 per 30 seconds)
+    // Handled externally for control
+
+    // World bounds
     const w = this.width + 0.01;
     this.x = Math.max(w, Math.min(world.worldWidth - w, this.x));
     this.z = Math.max(w, Math.min(world.worldDepth - w, this.z));
+
+    // Void death
     if (this.y < -10) {
-      const spawn = world.findSpawnPoint();
-      this.x = spawn.x; this.y = spawn.y; this.z = spawn.z;
-      this.vx = 0; this.vy = 0; this.vz = 0;
+      this.takeDamage(100, world);
     }
   }
 
   private updateWalking(dt: number, world: VoxelWorld) {
     const forward = this.getForward();
     const right = this.getRight();
+    const speed = this.wantSprint && this.moveForward && !this.wantSneak ? this.sprintSpeed : this.moveSpeed;
 
     this.vx = 0;
     this.vz = 0;
 
-    if (this.moveForward) { this.vx += forward[0] * this.moveSpeed; this.vz += forward[2] * this.moveSpeed; }
-    if (this.moveBackward) { this.vx -= forward[0] * this.moveSpeed; this.vz -= forward[2] * this.moveSpeed; }
-    if (this.moveLeft) { this.vx -= right[0] * this.moveSpeed; this.vz -= right[2] * this.moveSpeed; }
-    if (this.moveRight) { this.vx += right[0] * this.moveSpeed; this.vz += right[2] * this.moveSpeed; }
+    if (this.moveForward) { this.vx += forward[0] * speed; this.vz += forward[2] * speed; }
+    if (this.moveBackward) { this.vx -= forward[0] * speed * 0.6; this.vz -= forward[2] * speed * 0.6; }
+    if (this.moveLeft) { this.vx -= right[0] * speed; this.vz -= right[2] * speed; }
+    if (this.moveRight) { this.vx += right[0] * speed; this.vz += right[2] * speed; }
 
-    if (this.wantJump && this.onGround) { this.vy = this.jumpSpeed; this.onGround = false; }
-    this.vy += this.gravity * dt;
-    if (this.vy < this.terminalVel) this.vy = this.terminalVel;
+    // Jump (only if on ground, or swimming)
+    if (this.wantJump && (this.onGround || this.inWater)) {
+      if (this.inWater) {
+        this.vy = 3.5; // slower in water
+      } else {
+        this.vy = this.jumpSpeed;
+      }
+      this.onGround = false;
+    }
 
+    // Gravity
+    if (this.inWater) {
+      this.vy += this.gravity * dt * 0.15; // reduced gravity in water
+      this.vy = Math.max(this.vy, -2); // terminal in water
+      // Swim up if holding jump
+      if (this.wantJump) this.vy = Math.max(this.vy, 2);
+    } else {
+      this.vy += this.gravity * dt;
+      if (this.vy < this.terminalVel) this.vy = this.terminalVel;
+    }
+
+    // Track fall start
+    if (this.onGround) {
+      this.lastFallY = this.y;
+    }
+
+    // Move with collision
     this.onGround = false;
     this.x += this.vx * dt;
     if (this.collides(world)) { this.x -= this.vx * dt; this.vx = 0; }
     this.z += this.vz * dt;
     if (this.collides(world)) { this.z -= this.vz * dt; this.vz = 0; }
     this.y += this.vy * dt;
-    if (this.collides(world)) { this.y -= this.vy * dt; if (this.vy < 0) this.onGround = true; this.vy = 0; }
+    if (this.collides(world)) {
+      this.y -= this.vy * dt;
+      if (this.vy < 0) {
+        this.onGround = true;
+        // Fall damage: more than 3 blocks
+        const fallDist = this.lastFallY - this.y;
+        if (fallDist > 3 && !this.inWater) {
+          const dmg = Math.floor(fallDist - 3);
+          this.takeDamage(dmg, world);
+        }
+      }
+      this.vy = 0;
+    }
   }
 
   private updateFlying(dt: number, world: VoxelWorld) {
     const lookDir = this.getLookDir();
-    // Forward/backward along look direction (horizontal + vertical)
     const speed = this.flySpeed;
+    const forward = this.getForward();
+    const right = this.getRight();
 
     this.vx = 0; this.vy = 0; this.vz = 0;
 
-    if (this.moveForward) {
-      this.vx += lookDir[0] * speed;
-      this.vy += lookDir[1] * speed;
-      this.vz += lookDir[2] * speed;
-    }
-    if (this.moveBackward) {
-      this.vx -= lookDir[0] * speed;
-      this.vy -= lookDir[1] * speed;
-      this.vz -= lookDir[2] * speed;
-    }
-    if (this.moveLeft) { this.vx -= this.getRight()[0] * speed; this.vz -= this.getRight()[2] * speed; }
-    if (this.moveRight) { this.vx += this.getRight()[0] * speed; this.vz += this.getRight()[2] * speed; }
+    // Horizontal movement
+    if (this.moveForward) { this.vx += forward[0] * speed; this.vz += forward[2] * speed; }
+    if (this.moveBackward) { this.vx -= forward[0] * speed; this.vz -= forward[2] * speed; }
+    if (this.moveLeft) { this.vx -= right[0] * speed; this.vz -= right[2] * speed; }
+    if (this.moveRight) { this.vx += right[0] * speed; this.vz += right[2] * speed; }
 
-    // Space = up, Shift = down
+    // Vertical: space up, shift down
     if (this.wantJump) this.vy += speed;
     if (this.wantSneak) this.vy -= speed;
 
-    // Apply movement
+    // Move with collision
     this.x += this.vx * dt;
-    if (this.collides(world)) { this.x -= this.vx * dt; }
+    if (this.collides(world)) this.x -= this.vx * dt;
     this.z += this.vz * dt;
-    if (this.collides(world)) { this.z -= this.vz * dt; }
+    if (this.collides(world)) this.z -= this.vz * dt;
     this.y += this.vy * dt;
-    if (this.collides(world)) { this.y -= this.vy * dt; }
-
-    // Stay above ground in fly mode (don't clip through floor)
+    if (this.collides(world)) this.y -= this.vy * dt;
     if (this.y < 0) this.y = 0;
   }
 
-  // Handle space press for double-tap flight toggle
-  handleSpacePress(now: number): boolean {
-    // Double-tap detection (within 300ms)
-    if (now - this.lastSpacePress < 300) {
-      this.flying = !this.flying;
-      this.vy = 0; // reset vertical velocity on toggle
-      if (this.onFlightToggle) this.onFlightToggle(this.flying);
-      this.lastSpacePress = 0; // reset to prevent triple-tap
-      return true; // consumed by flight toggle
-    }
-    this.lastSpacePress = now;
-    return false; // normal jump
+  takeDamage(amount: number, world: VoxelWorld): void {
+    if (this.damageCooldown > 0) return;
+    this.health = Math.max(0, this.health - amount);
+    this.damageCooldown = 0.5;
+    this.hurtTimer = 0.3;
+    // Knockback slightly upward
+    this.vy = 4;
+  }
+
+  heal(amount: number): void {
+    this.health = Math.min(this.maxHealth, this.health + amount);
+  }
+
+  private isInWater(world: VoxelWorld): boolean {
+    const eyeY = Math.floor(this.y + this.eyeHeight);
+    return world.getBlock(Math.floor(this.x), eyeY, Math.floor(this.z)) !== 0 &&
+           !world.isSolid(Math.floor(this.x), eyeY, Math.floor(this.z));
   }
 
   getForward(): [number, number, number] {

@@ -25,3 +25,31 @@ Stage Summary:
 - All 5 tasks completed: optimization fix, parkour generation, flight mode, ESC menu, memory leak
 - Files modified: engine.ts, physics.ts, world.ts, page.tsx
 - Build passes cleanly
+
+---
+Task ID: 2
+Agent: main
+Task: Massive SinCraft rewrite - rename, new blocks, survival, inventory, shadows, modern UI
+
+Work Log:
+- Renamed project from LiteCraft to SinCraft
+- Created SVG logo (logo.svg) and favicon (favicon.svg) with voxel cube design
+- Rewrote blocks.ts: 40+ block types (ores, wood variants, building blocks, lighting, decorative), BlockDef interface with emissive/solid/transparent/hardness/drops, crafting recipes, inventory system (36 slots)
+- Rewrote renderer.ts: Added emissive vertex attribute, per-face ambient occlusion (shader-based: top=1.0, sides=0.75, bottom=0.5), emissive glow effect, shadowStrength uniform
+- Rewrote physics.ts: Sprint (Ctrl key, 6.0 speed), fly via Shift toggle (creative only), swimming in water, fall damage tracking, survival health/hunger system, damage cooldown, hurt timer
+- Rewrote world.ts: gameMode setting (survival/creative), ore generation (coal/iron/gold/diamond), cave generation (random walk carving), bedrock layer, multiple tree types (oak/birch/spruce), snow on mountain peaks, emissive data in mesh building
+- Rewrote engine.ts: Inventory system integration, block drops on break, consume on place, survival hunger drain, death/respawn, removed directional rendering (frustum only)
+- Rewrote page.tsx: Complete UI overhaul - dark modern theme (#0a0e17), SinCraft branding, game mode selection (survival/creative), health bar (10 hearts), hunger bar (10 drumsticks), hotbar with item counts, settings screen in main menu, no top bar during gameplay, clean pause menu with stats/settings
+- Updated save.ts: Changed storage keys from litecraft_* to sincraft_*
+- Updated layout.tsx: SinCraft metadata and favicon
+
+Stage Summary:
+- Full project rename LiteCraft -> SinCraft
+- 40+ block types with proper definitions
+- Survival mode: health, hunger, fall damage, swimming
+- Creative mode: fly toggle, unlimited blocks
+- Inventory system with 36 slots
+- Per-face ambient occlusion shadows
+- Emissive block glow (torch, lava, glowstone)
+- Ore veins and cave generation
+- Modern dark UI with no debug info during gameplay

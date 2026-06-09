@@ -14,10 +14,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Lite3D Engine — Lightweight 3D for Weak PCs",
-  description: "Custom WebGL 2-based 3D engine optimized for low-end hardware. Low-poly rendering, flat shading, resolution scaling.",
+  title: "SinCraft — Voxel Engine",
+  description: "SinCraft — voxel sandbox game built with custom WebGL 2 renderer.",
   icons: {
-    icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
+    icon: "/favicon.svg",
   },
 };
 

@@ -19,8 +19,8 @@ export interface WorldSaveData {
   chunkCount: number;  // number of saved chunks
 }
 
-const META_KEY = 'litecraft_saves';
-const DB_NAME = 'litecraft_chunks';
+const META_KEY = 'sincraft_saves';
+const DB_NAME = 'sincraft_chunks';
 const DB_VERSION = 1;
 const STORE_NAME = 'chunks';
 

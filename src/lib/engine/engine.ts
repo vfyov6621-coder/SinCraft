@@ -1,7 +1,6 @@
 // ==========================================
-// LiteCraft Engine - Optimized game loop
-// Frustum culling, FPS cap, crash protection
-// Flight mode (double-space)
+// SinCraft Engine - Game loop
+// Frustum culling, FPS cap, inventory, survival
 // ==========================================
 
 import { Renderer, MeshData } from './renderer';
@@ -9,7 +8,7 @@ import { VoxelWorld, WorldSettings } from './world';
 import { PlayerPhysics } from './physics';
 import { raycast, RayHit } from './raycast';
 import { Mat4, mat4Perspective, mat4LookAt, mat4Multiply, extractFrustumPlanes, isAABBVisible } from './math';
-import { BlockType, HOTBAR_BLOCKS } from './blocks';
+import { BlockType, HOTBAR_BLOCKS, BLOCK_COLORS, ItemStack, createInventory, addToInventory, removeFromInventory, hasItems } from './blocks';
 import { CHUNK_SIZE } from './chunk';
 import { GameNetwork, RemotePlayer } from './network';
 
@@ -19,16 +18,16 @@ export interface GameCallbacks {
   onRemotePlayersUpdate: (players: RemotePlayer[]) => void;
   onSlotChange: (slot: number) => void;
   onFlightToggle: (flying: boolean) => void;
+  onHealthUpdate: (health: number, hunger: number) => void;
+  onInventoryUpdate: (inventory: ItemStack[]) => void;
+  onDeath: () => void;
 }
 
 export interface GameStats {
   fps: number;
-  triangles: number;
-  drawCalls: number;
-  chunksVisible: number;
-  chunksTotal: number;
-  res: string;
   flying: boolean;
+  health: number;
+  hunger: number;
 }
 
 export class Game {
@@ -37,9 +36,7 @@ export class Game {
   player!: PlayerPhysics;
   network: GameNetwork | null = null;
 
-  // Chunk mesh storage
   private chunkMeshes: Map<string, MeshData> = new Map();
-
   private animFrame = 0;
   private lastTime = 0;
   private fpsFrames = 0;
@@ -51,30 +48,26 @@ export class Game {
   private errorCount = 0;
   private maxErrors = 10;
 
-  // Render settings
-  renderDistance = 8;
-  maxFps = 0; // 0 = unlimited (vsync)
-
-  // FPS cap timing
+  renderDistance = 10;
+  maxFps = 0;
   private lastRenderTime = 0;
-  private minFrameInterval = 0; // ms between frames (0 = no cap)
-
-  // Dirty chunk rebuild limit (prevents freeze on mass changes)
+  private minFrameInterval = 0;
   private maxChunkRebuildsPerFrame = 6;
   private pendingDirtyChunks: { cx: number; cz: number }[] = [];
 
   selectedSlot = 0;
   targetBlock: RayHit | null = null;
   callbacks: GameCallbacks;
-
-  // WebGL context loss handling
   private contextLost = false;
+
+  // Inventory
+  inventory: ItemStack[] = createInventory();
 
   get settings(): WorldSettings { return this.world.settings; }
 
   constructor(private canvas: HTMLCanvasElement, private config: { resolutionScale?: number; renderDistance?: number; maxFps?: number }) {
     this.resolutionScale = config.resolutionScale ?? 0.75;
-    this.renderDistance = config.renderDistance ?? 8;
+    this.renderDistance = config.renderDistance ?? 10;
     this.maxFps = config.maxFps ?? 0;
     if (this.maxFps > 0) this.minFrameInterval = 1000 / this.maxFps;
     this.callbacks = {
@@ -83,6 +76,9 @@ export class Game {
       onRemotePlayersUpdate: () => {},
       onSlotChange: () => {},
       onFlightToggle: () => {},
+      onHealthUpdate: () => {},
+      onInventoryUpdate: () => {},
+      onDeath: () => {},
     };
   }
 
@@ -90,30 +86,22 @@ export class Game {
     this.renderer = new Renderer(this.canvas);
     this.world = new VoxelWorld(settings);
 
-    // Handle WebGL context loss
     this.canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this.contextLost = true;
-      console.warn('WebGL context lost - pausing game');
       this.togglePause();
     });
     this.canvas.addEventListener('webglcontextrestored', () => {
       this.contextLost = false;
-      console.log('WebGL context restored - rebuilding meshes');
       try {
         this.renderer = new Renderer(this.canvas);
         this.rebuildAllChunkMeshes();
         this.updateFog();
-      } catch (err) {
-        console.error('Failed to restore WebGL:', err);
-      }
+      } catch (err) { console.error('WebGL restore failed:', err); }
     });
 
-    // Generate or load terrain
     this.world.generateAll();
-    if (savedChunks) {
-      this.world.deserializeChunks(savedChunks);
-    }
+    if (savedChunks) this.world.deserializeChunks(savedChunks);
 
     this.player = new PlayerPhysics();
 
@@ -129,17 +117,15 @@ export class Game {
       this.player.z = spawn.z;
     }
 
-    // Set up flight toggle callback
-    this.player.onFlightToggle = (flying) => {
-      this.callbacks.onFlightToggle(flying);
-    };
+    this.player.onFlightToggle = (flying) => this.callbacks.onFlightToggle(flying);
 
-    // Build initial chunk meshes
+    // Give starter items in survival
+    if (settings.gameMode === 'survival') {
+      // No starter items - pure survival
+    }
+
     this.rebuildAllChunkMeshes();
-
-    // Set fog based on render distance
     this.updateFog();
-
     this.handleResize();
     this.setupInput();
     window.addEventListener('resize', this.handleResize);
@@ -161,85 +147,64 @@ export class Game {
 
   setResolutionScale(s: number) { this.resolutionScale = s; this.handleResize(); }
   setRenderDistance(d: number) { this.renderDistance = Math.max(2, Math.min(50, d)); this.updateFog(); }
-  setMaxFps(fps: number) {
-    this.maxFps = fps;
-    this.minFrameInterval = fps > 0 ? 1000 / fps : 0;
-  }
-
-  get selectedBlockType(): BlockType { return HOTBAR_BLOCKS[this.selectedSlot] ?? BlockType.Stone; }
+  setMaxFps(fps: number) { this.maxFps = fps; this.minFrameInterval = fps > 0 ? 1000 / fps : 0; }
 
   // --- Chunk Mesh Management ---
 
   private rebuildAllChunkMeshes(): void {
-    // Delete all existing meshes
-    for (const mesh of this.chunkMeshes.values()) {
-      this.renderer.deleteMesh(mesh);
-    }
+    for (const mesh of this.chunkMeshes.values()) this.renderer.deleteMesh(mesh);
     this.chunkMeshes.clear();
     this.pendingDirtyChunks = [];
 
-    // Build meshes for all non-empty chunks
     for (const [, chunk] of this.world.chunks) {
       if (!chunk.isEmpty()) {
         try {
           const key = `${chunk.cx},${chunk.cz}`;
           const data = this.world.buildChunkMesh(chunk.cx, chunk.cz);
           if (data) {
-            this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices));
+            this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices, data.emissive));
           }
         } catch (err) {
-          console.error(`Failed to build mesh for chunk ${chunk.cx},${chunk.cz}:`, err);
+          console.error(`Mesh build error ${chunk.cx},${chunk.cz}:`, err);
         }
       }
     }
   }
 
   private rebuildDirtyChunks(): void {
-    // Collect new dirty chunks
     const newDirty = this.world.getAndClearDirtyChunks();
     for (const chunk of newDirty) {
-      // Avoid duplicates in pending
       const exists = this.pendingDirtyChunks.some(p => p.cx === chunk.cx && p.cz === chunk.cz);
-      if (!exists) {
-        this.pendingDirtyChunks.push({ cx: chunk.cx, cz: chunk.cz });
-      }
+      if (!exists) this.pendingDirtyChunks.push({ cx: chunk.cx, cz: chunk.cz });
     }
 
-    // Build limited number per frame to prevent freezes
     const maxBuild = this.maxChunkRebuildsPerFrame;
     let built = 0;
     const remaining: { cx: number; cz: number }[] = [];
 
     for (const { cx, cz } of this.pendingDirtyChunks) {
-      if (built >= maxBuild) {
-        remaining.push({ cx, cz });
-        continue;
-      }
+      if (built >= maxBuild) { remaining.push({ cx, cz }); continue; }
       try {
         const key = `${cx},${cz}`;
         const oldMesh = this.chunkMeshes.get(key);
-        if (oldMesh) {
-          this.renderer.deleteMesh(oldMesh);
-          this.chunkMeshes.delete(key);
-        }
+        if (oldMesh) { this.renderer.deleteMesh(oldMesh); this.chunkMeshes.delete(key); }
         const data = this.world.buildChunkMesh(cx, cz);
         if (data) {
-          this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices));
+          this.chunkMeshes.set(key, this.renderer.createMesh(data.vertices, data.normals, data.colors, data.indices, data.emissive));
         } else {
-          // Chunk became empty, remove mesh entry
           this.chunkMeshes.delete(key);
         }
         built++;
       } catch (err) {
-        console.error(`Failed to rebuild chunk ${cx},${cz}:`, err);
+        console.error(`Rebuild error ${cx},${cz}:`, err);
         remaining.push({ cx, cz });
       }
     }
-
     this.pendingDirtyChunks = remaining;
   }
 
-  // --- Save data ---
+  // --- Save / Network ---
+
   getSaveData() {
     return {
       blocks: this.world.serializeChunks(),
@@ -248,28 +213,18 @@ export class Game {
     };
   }
 
-  // --- Network ---
-  startNetwork(playerId: string, playerName: string, playerColor: string, port?: number) {
-    this.network = new GameNetwork(playerId, playerName, playerColor, {
-      onWorldData: (data, w, h, d) => {
-        this.world.deserializeChunks(new Map(Object.entries(data)));
-        this.rebuildDirtyChunks();
-      },
-      onBlockSet: (x, y, z, type) => {
-        this.world.setBlock(x, y, z, type as BlockType);
-        this.rebuildDirtyChunks();
-      },
-      onPlayerJoin: () => {},
-      onPlayerLeave: () => {},
-      onPlayerPos: () => {},
-      onPlayersList: () => {},
-      onChat: () => {},
+  startNetwork(pid: string, name: string, color: string, port?: number) {
+    this.network = new GameNetwork(pid, name, color, {
+      onWorldData: (data) => { this.world.deserializeChunks(new Map(Object.entries(data))); this.rebuildDirtyChunks(); },
+      onBlockSet: (x, y, z, type) => { this.world.setBlock(x, y, z, type as BlockType); this.rebuildDirtyChunks(); },
+      onPlayerJoin: () => {}, onPlayerLeave: () => {},
+      onPlayerPos: () => {}, onPlayersList: () => {}, onChat: () => {},
     });
     this.network.connect(port);
   }
 
-  hostNetwork(playerId: string, playerName: string, playerColor: string, port?: number) {
-    this.startNetwork(playerId, playerName, playerColor, port);
+  hostNetwork(pid: string, name: string, color: string, port?: number) {
+    this.startNetwork(pid, name, color, port);
     setTimeout(() => {
       if (this.network?.isConnected) {
         const chunks = this.world.serializeChunks();
@@ -280,16 +235,26 @@ export class Game {
     }, 500);
   }
 
-  stopNetwork() {
-    if (this.network) { this.network.disconnect(); this.network = null; }
-  }
+  stopNetwork() { if (this.network) { this.network.disconnect(); this.network = null; } }
 
-  // --- Block interaction ---
+  // --- Block Interaction ---
+
   removeBlock() {
     if (!this.targetBlock) return;
     const { x, y, z } = this.targetBlock;
+    const blockType = this.world.getBlock(x, y, z);
+    const bd = BLOCK_COLORS[blockType];
+
     this.world.setBlock(x, y, z, BlockType.Air);
     this.rebuildDirtyChunks();
+
+    // Drop item to inventory (in survival, bedrock can't be broken)
+    if (bd && bd.hardness < 100) {
+      const dropType = bd.drops ?? blockType;
+      addToInventory(this.inventory, dropType, 1);
+      this.callbacks.onInventoryUpdate([...this.inventory]);
+    }
+
     if (this.network?.isConnected) this.network.sendBlock(x, y, z, 0);
   }
 
@@ -299,17 +264,28 @@ export class Game {
     if (!this.world.inBounds(placeX, placeY, placeZ)) return;
     if (this.world.isSolid(placeX, placeY, placeZ)) return;
 
-    const p = this.player; const hw = p.width; const h = p.height;
-    if (p.x + hw > placeX && p.x - hw < placeX + 1 &&
-        p.y + h > placeY && p.y < placeY + 1 &&
-        p.z + hw > placeZ && p.z - hw < placeZ + 1) return;
+    const p = this.player;
+    if (p.x + p.width > placeX && p.x - p.width < placeX + 1 &&
+        p.y + p.height > placeY && p.y < placeY + 1 &&
+        p.z + p.width > placeZ && p.z - p.width < placeZ + 1) return;
 
-    this.world.setBlock(placeX, placeY, placeZ, this.selectedBlockType);
+    // Check inventory
+    const hotbarItem = this.inventory[this.selectedSlot];
+    if (hotbarItem.count <= 0 || hotbarItem.block === BlockType.Air) return;
+
+    const blockToPlace = hotbarItem.block;
+    this.world.setBlock(placeX, placeY, placeZ, blockToPlace);
     this.rebuildDirtyChunks();
-    if (this.network?.isConnected) this.network.sendBlock(placeX, placeY, placeZ, this.selectedBlockType);
+
+    // Consume from inventory
+    removeFromInventory(this.inventory, blockToPlace, 1);
+    this.callbacks.onInventoryUpdate([...this.inventory]);
+
+    if (this.network?.isConnected) this.network.sendBlock(placeX, placeY, placeZ, blockToPlace);
   }
 
   // --- Input ---
+
   private setupInput() {
     document.addEventListener('keydown', this.onKeyDown);
     document.addEventListener('keyup', this.onKeyUp);
@@ -320,9 +296,7 @@ export class Game {
     this.canvas.addEventListener('contextmenu', this.onCanvasContextMenu);
   }
 
-  private onCanvasClick = () => {
-    if (!this.paused && !this.contextLost) this.canvas.requestPointerLock();
-  };
+  private onCanvasClick = () => { if (!this.paused && !this.contextLost) this.canvas.requestPointerLock(); };
   private onCanvasContextMenu = (e: Event) => e.preventDefault();
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -332,17 +306,26 @@ export class Game {
       case 'KeyS': case 'ArrowDown': this.player.moveBackward = true; break;
       case 'KeyA': case 'ArrowLeft': this.player.moveLeft = true; break;
       case 'KeyD': case 'ArrowRight': this.player.moveRight = true; break;
-      case 'Space':
-        // Double-tap detection for flight toggle
-        const now = performance.now();
-        const toggled = this.player.handleSpacePress(now);
-        if (!toggled) {
-          this.player.wantJump = true;
-        }
-        e.preventDefault();
-        break;
       case 'ShiftLeft': case 'ShiftRight':
         this.player.wantSneak = true;
+        // Toggle fly in creative
+        if (this.settings.gameMode === 'creative') {
+          this.player.flying = !this.player.flying;
+          this.player.vy = 0;
+          this.callbacks.onFlightToggle(this.player.flying);
+        }
+        break;
+      case 'ControlLeft': case 'ControlRight':
+        this.player.wantSprint = true;
+        e.preventDefault();
+        break;
+      case 'Space':
+        this.player.wantJump = true;
+        e.preventDefault();
+        break;
+      case 'KeyE':
+        // Toggle inventory (not implemented yet)
+        e.preventDefault();
         break;
       case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
@@ -360,6 +343,7 @@ export class Game {
       case 'KeyD': case 'ArrowRight': this.player.moveRight = false; break;
       case 'Space': this.player.wantJump = false; break;
       case 'ShiftLeft': case 'ShiftRight': this.player.wantSneak = false; break;
+      case 'ControlLeft': case 'ControlRight': this.player.wantSprint = false; break;
     }
   };
 
@@ -379,8 +363,8 @@ export class Game {
   private onWheel = (e: WheelEvent) => {
     e.preventDefault();
     if (this.paused) return;
-    if (e.deltaY > 0) this.selectedSlot = (this.selectedSlot + 1) % HOTBAR_BLOCKS.length;
-    else this.selectedSlot = (this.selectedSlot - 1 + HOTBAR_BLOCKS.length) % HOTBAR_BLOCKS.length;
+    if (e.deltaY > 0) this.selectedSlot = (this.selectedSlot + 1) % 9;
+    else this.selectedSlot = (this.selectedSlot - 1 + 9) % 9;
     this.callbacks.onSlotChange(this.selectedSlot);
   };
 
@@ -404,11 +388,11 @@ export class Game {
 
   resumeGame() {
     this.paused = false;
-    // Re-lock pointer when resuming
     this.canvas.requestPointerLock();
   }
 
-  // --- Game loop ---
+  // --- Game Loop ---
+
   start() {
     this.running = true; this.lastTime = performance.now(); this.lastRenderTime = 0;
     this.errorCount = 0;
@@ -428,19 +412,29 @@ export class Game {
       const dt = Math.min((now - this.lastTime) / 1000, 0.1);
       this.lastTime = now;
 
-      // FPS counter
       this.fpsFrames++; this.fpsTime += dt;
       if (this.fpsTime >= 0.5) {
         this.currentFps = Math.round(this.fpsFrames / this.fpsTime);
         this.fpsFrames = 0; this.fpsTime = 0;
       }
 
-      // Rebuild dirty chunks (even when paused for consistency)
       this.rebuildDirtyChunks();
 
-      // Physics always runs when not paused
       if (!this.paused && !this.contextLost) {
         this.player.update(dt, this.world);
+
+        // Survival: hunger drain
+        if (this.settings.gameMode === 'survival') {
+          this.player.hunger = Math.max(0, this.player.hunger - dt * 0.03);
+          // Heal if well fed
+          if (this.player.hunger > 14 && this.player.health < this.player.maxHealth) {
+            this.player.health = Math.min(this.player.maxHealth, this.player.health + dt * 0.5);
+          }
+          // Starve if no hunger
+          if (this.player.hunger <= 0) {
+            this.player.takeDamage(1, this.world);
+          }
+        }
 
         const eye = this.player.getEyePos();
         const dir = this.player.getLookDir();
@@ -449,16 +443,23 @@ export class Game {
         if (this.network?.isConnected) {
           this.network.sendPosition(this.player.x, this.player.y, this.player.z, this.player.yaw, this.player.pitch);
         }
+
+        // Check death
+        if (this.player.health <= 0) {
+          this.callbacks.onDeath();
+        }
+
+        // Update health/hunger UI
+        this.callbacks.onHealthUpdate(this.player.health, this.player.hunger);
       }
 
-      // FPS cap: skip rendering if not enough time passed
+      // FPS cap
       if (this.minFrameInterval > 0) {
         const elapsed = now - this.lastRenderTime;
         if (elapsed < this.minFrameInterval) return;
         this.lastRenderTime = now - (elapsed % this.minFrameInterval);
       }
 
-      // --- Render ---
       if (this.contextLost) return;
 
       const w = this.canvas.width;
@@ -476,14 +477,11 @@ export class Game {
       this.renderer.viewMatrix = view;
       this.renderer.cameraPos = eyePos;
 
-      // Compute frustum planes for culling (only frustum, no directional)
       const vp = mat4Multiply(proj, view);
       const frustum = extractFrustumPlanes(vp);
 
-      // Begin rendering
       this.renderer.beginFrame();
 
-      // Render visible chunks with frustum culling only
       let chunksVisible = 0;
       const playerCX = (this.player.x / CHUNK_SIZE) | 0;
       const playerCZ = (this.player.z / CHUNK_SIZE) | 0;
@@ -492,54 +490,40 @@ export class Game {
       const worldH = this.world.worldHeight;
       const halfSizeXZ = CHUNK_SIZE / 2;
       const halfSizeY = worldH / 2;
-      const centerY = halfSizeY;
 
       for (const [key, mesh] of this.chunkMeshes) {
         const comma = key.indexOf(',');
         const cx = parseInt(key.substring(0, comma));
         const cz = parseInt(key.substring(comma + 1));
 
-        // Distance check (circular, chunk-level)
         const dx = cx - playerCX;
         const dz = cz - playerCZ;
         if (dx * dx + dz * dz > rdSq) continue;
 
-        // Frustum culling: AABB = chunk in world space
-        const chunkCenterX = cx * CHUNK_SIZE + halfSizeXZ;
-        const chunkCenterZ = cz * CHUNK_SIZE + halfSizeXZ;
-        if (!isAABBVisible(chunkCenterX, centerY, chunkCenterZ, halfSizeXZ, halfSizeY, halfSizeXZ, frustum)) continue;
+        const ccx = cx * CHUNK_SIZE + halfSizeXZ;
+        const ccz = cz * CHUNK_SIZE + halfSizeXZ;
+        if (!isAABBVisible(ccx, halfSizeY, ccz, halfSizeXZ, halfSizeY, halfSizeXZ, frustum)) continue;
 
         this.renderer.renderMesh(mesh);
         chunksVisible++;
       }
 
-      // Draw block highlight
       if (this.targetBlock) {
-        this.renderer.renderHighlight({
-          x: this.targetBlock.x, y: this.targetBlock.y, z: this.targetBlock.z,
-        });
+        this.renderer.renderHighlight({ x: this.targetBlock.x, y: this.targetBlock.y, z: this.targetBlock.z });
       }
 
-      // Update stats
       this.callbacks.onStatsUpdate({
         fps: this.currentFps,
-        triangles: this.renderer.totalTriangles,
-        drawCalls: this.renderer.drawCalls,
-        chunksVisible,
-        chunksTotal: this.world.chunks.size,
-        res: `${w}x${h}`,
         flying: this.player.flying,
+        health: this.player.health,
+        hunger: this.player.hunger,
       });
-      if (this.network) this.callbacks.onRemotePlayersUpdate(Array.from(this.network.remotePlayers.values()));
 
-      // Reset error counter on successful frame
       this.errorCount = 0;
-
     } catch (err) {
       console.error('Game loop error:', err);
       this.errorCount++;
       if (this.errorCount >= this.maxErrors) {
-        console.error('Too many errors, stopping game loop');
         this.running = false;
         this.callbacks.onPause();
       }
@@ -550,10 +534,7 @@ export class Game {
     this.stop();
     this.stopNetwork();
     window.removeEventListener('resize', this.handleResize);
-    // Delete all chunk meshes - CRITICAL for preventing memory leak
-    for (const mesh of this.chunkMeshes.values()) {
-      try { this.renderer.deleteMesh(mesh); } catch {}
-    }
+    for (const mesh of this.chunkMeshes.values()) { try { this.renderer.deleteMesh(mesh); } catch {} }
     this.chunkMeshes.clear();
     this.pendingDirtyChunks = [];
     try { this.renderer.destroy(); } catch {}

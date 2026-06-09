@@ -1,7 +1,6 @@
 // ==========================================
-// Lightweight 3D Engine - WebGL 2 Renderer
-// Multi-mesh rendering for chunks
-// Fixed highlight wireframe (no double draw)
+// SinCraft - WebGL 2 Renderer
+// Multi-mesh chunk rendering, shadow AO, emissive blocks
 // ==========================================
 
 import { Mat4 } from './math';
@@ -10,22 +9,29 @@ const VERTEX_SHADER = `
   attribute vec3 aPosition;
   attribute vec3 aNormal;
   attribute vec3 aColor;
+  attribute float aEmissive;
 
   uniform mat4 uProjection;
   uniform mat4 uView;
-  uniform mat4 uModel;
-  uniform mat3 uNormalMatrix;
 
   varying vec3 vColor;
   varying vec3 vNormal;
   varying vec3 vWorldPos;
+  varying float vEmissive;
+  varying float vAO;
 
   void main() {
-    vec4 worldPos = uModel * vec4(aPosition, 1.0);
+    vec4 worldPos = vec4(aPosition, 1.0);
     gl_Position = uProjection * uView * worldPos;
     vColor = aColor;
-    vNormal = normalize(uNormalMatrix * aNormal);
+    vNormal = normalize(aNormal);
     vWorldPos = worldPos.xyz;
+    vEmissive = aEmissive;
+    // Simple AO: darken faces that are not top-facing
+    vAO = 1.0;
+    if (aNormal.y < -0.5) vAO = 0.5;       // bottom
+    else if (abs(aNormal.y) < 0.5) vAO = 0.75; // sides
+    // top face = 1.0 (full bright)
   }
 `;
 
@@ -35,6 +41,8 @@ const FRAGMENT_SHADER = `
   varying vec3 vColor;
   varying vec3 vNormal;
   varying vec3 vWorldPos;
+  varying float vEmissive;
+  varying float vAO;
 
   uniform vec3 uLightDir;
   uniform vec3 uFogColor;
@@ -42,14 +50,22 @@ const FRAGMENT_SHADER = `
   uniform float uFogFar;
   uniform float uAmbient;
   uniform vec3 uCameraPos;
+  uniform float uShadowStrength;
 
   void main() {
+    // Emissive blocks glow on their own
+    vec3 emissiveColor = vColor * vEmissive * 2.0;
+
+    // Directional lighting
     float diff = max(dot(vNormal, normalize(uLightDir)), 0.0);
     float light = uAmbient + diff * (1.0 - uAmbient);
 
-    vec3 color = vColor * light;
+    // Apply ambient occlusion
+    light *= mix(1.0, vAO, uShadowStrength);
 
-    // Distance fog - from camera, not origin!
+    vec3 color = vColor * light + emissiveColor;
+
+    // Distance fog from camera
     float depth = distance(vWorldPos, uCameraPos);
     float fogFactor = clamp((uFogFar - depth) / (uFogFar - uFogNear), 0.0, 1.0);
     color = mix(uFogColor, color, fogFactor);
@@ -58,7 +74,7 @@ const FRAGMENT_SHADER = `
   }
 `;
 
-// Wireframe shader with model matrix support
+// Wireframe shader for block highlight
 const LINE_VERT = `
   attribute vec3 aPosition;
   uniform mat4 uProjection;
@@ -101,6 +117,7 @@ export class Renderer {
   fogFar = 55;
   ambientStrength = 0.45;
   lightDir: [number, number, number] = [0.3, 0.8, 0.5];
+  shadowStrength = 0.6; // AO intensity (0 = off, 1 = full)
 
   // Stats
   drawCalls = 0;
@@ -125,8 +142,7 @@ export class Renderer {
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const log = gl.getShaderInfoLog(shader);
-      console.error('Shader compile error:', log || 'unknown');
+      console.error('Shader compile error:', gl.getShaderInfoLog(shader));
     }
     return shader;
   }
@@ -138,8 +154,7 @@ export class Renderer {
     gl.attachShader(prog, fs);
     gl.linkProgram(prog);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      const log = gl.getProgramInfoLog(prog);
-      console.error('Program link error:', log || 'unknown');
+      console.error('Program link error:', gl.getProgramInfoLog(prog));
     }
     return prog;
   }
@@ -153,17 +168,15 @@ export class Renderer {
     this.uniforms = {
       uProjection: gl.getUniformLocation(this.program, 'uProjection'),
       uView: gl.getUniformLocation(this.program, 'uView'),
-      uModel: gl.getUniformLocation(this.program, 'uModel'),
-      uNormalMatrix: gl.getUniformLocation(this.program, 'uNormalMatrix'),
       uLightDir: gl.getUniformLocation(this.program, 'uLightDir'),
       uFogColor: gl.getUniformLocation(this.program, 'uFogColor'),
       uFogNear: gl.getUniformLocation(this.program, 'uFogNear'),
       uFogFar: gl.getUniformLocation(this.program, 'uFogFar'),
       uAmbient: gl.getUniformLocation(this.program, 'uAmbient'),
       uCameraPos: gl.getUniformLocation(this.program, 'uCameraPos'),
+      uShadowStrength: gl.getUniformLocation(this.program, 'uShadowStrength'),
     };
 
-    // Line shader (with uOffset uniform for block highlight translation)
     const lvs = this.compileShader(gl.VERTEX_SHADER, LINE_VERT);
     const lfs = this.compileShader(gl.FRAGMENT_SHADER, LINE_FRAG);
     this.lineProgram = this.linkProgram(lvs, lfs);
@@ -181,27 +194,19 @@ export class Renderer {
       -e, -e, -e,  e, -e, -e,  e, 1+e, -e,  -e, 1+e, -e,
       -e, -e,  1+e,  e, -e,  1+e,  e, 1+e,  1+e,  -e, 1+e,  1+e,
     ];
-    const idx = [
-      0,1, 1,2, 2,3, 3,0,
-      4,5, 5,6, 6,7, 7,4,
-      0,4, 1,5, 2,6, 3,7,
-    ];
-
+    const idx = [0,1, 1,2, 2,3, 3,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7];
     this.highlightVAO = gl.createVertexArray()!;
     gl.bindVertexArray(this.highlightVAO);
-
     const buf = gl.createBuffer()!;
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(v), gl.STATIC_DRAW);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
     this.highlightBuffers.push(buf);
-
     const ibuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(idx), gl.STATIC_DRAW);
     this.highlightBuffers.push(ibuf);
-
     gl.bindVertexArray(null);
     this.highlightIndexCount = idx.length;
   }
@@ -211,11 +216,11 @@ export class Renderer {
     normals: number[],
     colors: number[],
     indices: number[],
+    emissive?: number[],
   ): MeshData {
     const gl = this.gl;
     const vao = gl.createVertexArray()!;
     gl.bindVertexArray(vao);
-
     const buffers: WebGLBuffer[] = [];
 
     const posBuf = gl.createBuffer()!;
@@ -239,9 +244,16 @@ export class Renderer {
     gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 0, 0);
     buffers.push(colBuf);
 
+    // Emissive per-vertex
+    const emBuf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, emBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(emissive || colors.map(() => 0)), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 0, 0);
+    buffers.push(emBuf);
+
     const idxBuf = gl.createBuffer()!;
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
-    // Use Uint32 for large meshes (WebGL 2 native support)
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(indices), gl.STATIC_DRAW);
     buffers.push(idxBuf);
 
@@ -252,9 +264,7 @@ export class Renderer {
   deleteMesh(mesh: MeshData): void {
     const gl = this.gl;
     gl.deleteVertexArray(mesh.vao);
-    for (const buf of mesh.buffers) {
-      gl.deleteBuffer(buf);
-    }
+    for (const buf of mesh.buffers) gl.deleteBuffer(buf);
   }
 
   cameraPos: [number, number, number] = [0, 0, 0];
@@ -275,18 +285,15 @@ export class Renderer {
     const gl = this.gl;
     gl.useProgram(this.program!);
 
-    // Set uniforms (identity model matrix for chunk meshes - positions are in world space)
-    const identity = this.identityMat;
     gl.uniformMatrix4fv(this.uniforms.uProjection, false, this.projectionMatrix);
     gl.uniformMatrix4fv(this.uniforms.uView, false, this.viewMatrix);
-    gl.uniformMatrix4fv(this.uniforms.uModel, false, identity);
-    gl.uniformMatrix3fv(this.uniforms.uNormalMatrix, false, this.identityMat3);
     gl.uniform3fv(this.uniforms.uLightDir, this.lightDir);
     gl.uniform3fv(this.uniforms.uFogColor, this.fogColor);
     gl.uniform1f(this.uniforms.uFogNear, this.fogNear);
     gl.uniform1f(this.uniforms.uFogFar, this.fogFar);
     gl.uniform1f(this.uniforms.uAmbient, this.ambientStrength);
     gl.uniform3fv(this.uniforms.uCameraPos, this.cameraPos);
+    gl.uniform1f(this.uniforms.uShadowStrength, this.shadowStrength);
 
     gl.bindVertexArray(mesh.vao);
     gl.drawElements(gl.TRIANGLES, mesh.indexCount, gl.UNSIGNED_INT, 0);
@@ -299,30 +306,14 @@ export class Renderer {
     const gl = this.gl;
     gl.disable(gl.CULL_FACE);
     gl.useProgram(this.lineProgram!);
-
     gl.uniformMatrix4fv(this.lineUniforms.uProjection, false, this.projectionMatrix);
     gl.uniformMatrix4fv(this.lineUniforms.uView, false, this.viewMatrix);
     gl.uniform3fv(this.lineUniforms.uOffset!, [pos.x, pos.y, pos.z]);
-
     gl.bindVertexArray(this.highlightVAO);
     gl.drawElements(gl.LINES, this.highlightIndexCount, gl.UNSIGNED_SHORT, 0);
     gl.enable(gl.CULL_FACE);
-
     gl.bindVertexArray(null);
   }
-
-  private identityMat = new Float32Array([
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 1, 0,
-    0, 0, 0, 1,
-  ]);
-
-  private identityMat3 = new Float32Array([
-    1, 0, 0,
-    0, 1, 0,
-    0, 0, 1,
-  ]);
 
   resizeWithScale(width: number, height: number, scale: number) {
     const s = Math.max(0.25, Math.min(1, scale));

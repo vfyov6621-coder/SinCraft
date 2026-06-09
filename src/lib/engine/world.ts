@@ -1,6 +1,6 @@
 // ==========================================
-// Voxel World - Chunk-based block storage + mesh generation
-// Supports configurable world size, terrain types, parkour generation
+// SinCraft - Voxel World
+// Chunk storage, terrain gen, ore caves, mesh building
 // ==========================================
 
 import { BlockType, BLOCK_COLORS } from './blocks';
@@ -8,23 +8,24 @@ import { Chunk, CHUNK_SIZE } from './chunk';
 
 export interface WorldSettings {
   seed: number;
-  chunkSize: number;    // number of chunks in X and Z (square world)
-  worldHeight: number;  // max Y blocks (32-128)
+  chunkSize: number;
+  worldHeight: number;
   terrainType: 'normal' | 'flat' | 'mountains' | 'islands' | 'parkour';
-  treeDensity: number;  // 0-100
+  treeDensity: number;
+  gameMode: 'survival' | 'creative';
 }
 
 export function defaultSettings(): WorldSettings {
   return {
     seed: 42,
-    chunkSize: 8,
-    worldHeight: 64,
+    chunkSize: 16,
+    worldHeight: 80,
     terrainType: 'normal',
-    treeDensity: 50,
+    treeDensity: 40,
+    gameMode: 'survival',
   };
 }
 
-// Simple seeded PRNG (mulberry32)
 function seededRandom(seed: number) {
   let s = seed | 0;
   return () => {
@@ -89,7 +90,6 @@ export class VoxelWorld {
     chunk.setBlock(lx, wy, lz, type);
     this.dirtyChunks.add(this.chunkKey(cx, cz));
 
-    // Mark neighbor chunks dirty if block is on border
     if (lx === 0 && cx > 0) this.markDirty(cx - 1, cz);
     if (lx === CHUNK_SIZE - 1 && cx < this.settings.chunkSize - 1) this.markDirty(cx + 1, cz);
     if (lz === 0 && cz > 0) this.markDirty(cx, cz - 1);
@@ -111,7 +111,6 @@ export class VoxelWorld {
     return BLOCK_COLORS[b]?.solid ?? true;
   }
 
-  // Get dirty chunks and clear dirty set
   getAndClearDirtyChunks(): Chunk[] {
     const result: Chunk[] = [];
     for (const key of this.dirtyChunks) {
@@ -130,16 +129,27 @@ export class VoxelWorld {
     if (this.settings.terrainType === 'parkour') {
       this.generateParkour();
     } else {
-      // Pass 1: base terrain per chunk
       for (let cx = 0; cx < this.settings.chunkSize; cx++) {
         for (let cz = 0; cz < this.settings.chunkSize; cz++) {
           this.generateChunkTerrain(cx, cz);
         }
       }
-      // Pass 2: trees (needs world-space block access across chunk boundaries)
+      // Bedrock layer
+      for (let cx = 0; cx < this.settings.chunkSize; cx++) {
+        for (let cz = 0; cz < this.settings.chunkSize; cz++) {
+          const chunk = this.getOrCreateChunk(cx, cz);
+          for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+            for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+              chunk.setBlock(lx, 0, lz, BlockType.Bedrock);
+            }
+          }
+        }
+      }
+      // Ores and caves
+      this.generateOres();
+      // Trees
       this.generateTrees();
     }
-    // Mark all generated chunks dirty
     for (const chunk of this.chunks.values()) {
       chunk.dirty = true;
       this.dirtyChunks.add(this.chunkKey(chunk.cx, chunk.cz));
@@ -153,14 +163,76 @@ export class VoxelWorld {
         const wx = cx * CHUNK_SIZE + lx;
         const wz = cz * CHUNK_SIZE + lz;
         const h = this.getTerrainHeight(wx, wz);
-        for (let y = 0; y <= h && y < this.worldHeight; y++) {
+        for (let y = 1; y <= h && y < this.worldHeight; y++) {
           let type: number;
-          if (y === 0) type = BlockType.Stone;
-          else if (y === h) type = h <= 4 ? BlockType.Sand : BlockType.Grass;
+          if (y === h) {
+            type = h <= 4 ? BlockType.Sand : (this.settings.terrainType === 'mountains' && h > this.worldHeight * 0.5 ? BlockType.Snow : BlockType.Grass);
+          }
           else if (y >= h - 3) type = h <= 4 ? BlockType.Sand : BlockType.Dirt;
           else type = BlockType.Stone;
           chunk.setBlock(lx, y, lz, type);
         }
+      }
+    }
+  }
+
+  private generateOres(): void {
+    const rng = seededRandom(this.settings.seed + 55555);
+    const W = this.worldWidth;
+    const D = this.worldDepth;
+
+    // Ore definitions: [type, minDepth, maxDepth, rarity (0-1)]
+    const ores: { type: BlockType; minH: number; maxH: number; chance: number; veinSize: number }[] = [
+      { type: BlockType.CoalOre, minH: 1, maxH: 0.8, chance: 0.008, veinSize: 8 },
+      { type: BlockType.IronOre, minH: 1, maxH: 0.6, chance: 0.005, veinSize: 6 },
+      { type: BlockType.GoldOre, minH: 1, maxH: 0.35, chance: 0.002, veinSize: 4 },
+      { type: BlockType.DiamondOre, minH: 1, maxH: 0.2, chance: 0.001, veinSize: 3 },
+    ];
+
+    for (const ore of ores) {
+      const count = Math.floor(W * D * ore.chance);
+      for (let i = 0; i < count; i++) {
+        const ox = Math.floor(rng() * W);
+        const oz = Math.floor(rng() * D);
+        const maxY = Math.floor(this.worldHeight * ore.maxH);
+        const oy = 1 + Math.floor(rng() * maxY);
+        // Place vein
+        for (let v = 0; v < ore.veinSize; v++) {
+          const vx = ox + Math.floor(rng() * 3) - 1;
+          const vy = oy + Math.floor(rng() * 3) - 1;
+          const vz = oz + Math.floor(rng() * 3) - 1;
+          if (this.getBlock(vx, vy, vz) === BlockType.Stone) {
+            this.setBlock(vx, vy, vz, ore.type);
+          }
+        }
+      }
+    }
+
+    // Small caves: carve out some stone areas
+    const caveCount = Math.floor(W * D * 0.0003);
+    for (let i = 0; i < caveCount; i++) {
+      const cx = 3 + Math.floor(rng() * (W - 6));
+      const cz = 3 + Math.floor(rng() * (D - 6));
+      const cy = 3 + Math.floor(rng() * (this.worldHeight * 0.5));
+      const len = 5 + Math.floor(rng() * 15);
+      let dx = 0, dy = 0, dz = 0;
+      for (let j = 0; j < len; j++) {
+        // Carve a 1-2 block wide tunnel
+        for (let ex = -1; ex <= 1; ex++) {
+          for (let ez = -1; ez <= 1; ez++) {
+            const bx = cx + ex, by = cy, bz = cz + ez;
+            if (this.getBlock(bx, by, bz) === BlockType.Stone && by > 0) {
+              this.setBlock(bx, by, bz, BlockType.Air);
+            }
+          }
+        }
+        // Random walk
+        dx += Math.floor(rng() * 3) - 1;
+        dy += Math.floor(rng() * 3) - 1;
+        dz += Math.floor(rng() * 3) - 1;
+        dx = Math.max(-1, Math.min(1, dx));
+        dy = Math.max(-1, Math.min(1, dy));
+        dz = Math.max(-1, Math.min(1, dz));
       }
     }
   }
@@ -170,7 +242,8 @@ export class VoxelWorld {
     const rng = seededRandom(this.settings.seed + 99999);
     const wW = this.worldWidth;
     const wD = this.worldDepth;
-    const treeCount = Math.floor(wW * wD * this.settings.treeDensity / 10000);
+    const treeCount = Math.floor(wW * wD * this.settings.treeDensity / 12000);
+
     for (let i = 0; i < treeCount; i++) {
       const tx = 3 + Math.floor(rng() * (wW - 6));
       const tz = 3 + Math.floor(rng() * (wD - 6));
@@ -178,9 +251,26 @@ export class VoxelWorld {
       for (let y = this.worldHeight - 1; y >= 0; y--) {
         if (this.getBlock(tx, y, tz) === BlockType.Grass) { groundY = y + 1; break; }
       }
-      if (groundY < 4 || groundY > this.worldHeight - 8) continue;
-      const trunkH = 3 + Math.floor(rng() * 2);
-      for (let y = 0; y < trunkH; y++) this.setBlock(tx, groundY + y, tz, BlockType.Wood);
+      if (groundY < 4 || groundY > this.worldHeight - 10) continue;
+
+      // Random tree type
+      const treeType = rng();
+      let logType = BlockType.OakLog;
+      let leafType = BlockType.OakLeaves;
+
+      if (treeType > 0.66) {
+        logType = BlockType.BirchLog;
+        leafType = BlockType.BirchLeaves;
+      } else if (treeType > 0.33) {
+        logType = BlockType.SpruceLog;
+        leafType = BlockType.SpruceLeaves;
+      }
+
+      const trunkH = 4 + Math.floor(rng() * 3);
+      for (let y = 0; y < trunkH; y++) {
+        this.setBlock(tx, groundY + y, tz, logType);
+      }
+
       const leafR = 2;
       for (let dx = -leafR; dx <= leafR; dx++) {
         for (let dz = -leafR; dz <= leafR; dz++) {
@@ -189,7 +279,7 @@ export class VoxelWorld {
             if (Math.sqrt(dx * dx + dy * dy + dz * dz) <= leafR + 0.5) {
               const bx = tx + dx, by = groundY + trunkH + dy, bz = tz + dz;
               if (this.getBlock(bx, by, bz) === 0) {
-                this.setBlock(bx, by, bz, BlockType.Leaves);
+                this.setBlock(bx, by, bz, leafType);
               }
             }
           }
@@ -199,8 +289,7 @@ export class VoxelWorld {
   }
 
   // ==========================================
-  // Parkour Terrain Generator
-  // Multi-level platforms with jumps between them
+  // Parkour Generator
   // ==========================================
 
   private generateParkour(): void {
@@ -209,134 +298,88 @@ export class VoxelWorld {
     const D = this.worldDepth;
     const H = this.worldHeight;
 
-    // Fill bottom layer with stone (void floor)
     for (let x = 0; x < W; x++) {
       for (let z = 0; z < D; z++) {
-        this.setBlock(x, 0, z, BlockType.Stone);
+        this.setBlock(x, 0, z, BlockType.Bedrock);
       }
     }
 
-    // Each level is about 8 blocks tall
     const levelStep = 8;
     const numLevels = Math.max(2, Math.floor((H - 16) / levelStep));
+    const levelBlocks: number[] = [BlockType.OakPlanks, BlockType.Cobblestone, BlockType.Sand, BlockType.Snow, BlockType.Brick, BlockType.StoneBrick];
 
-    // Block types per level
-    const levelBlocks: number[] = [
-      BlockType.Planks,
-      BlockType.Cobblestone,
-      BlockType.Sand,
-      BlockType.Snow,
-      BlockType.Planks,
-      BlockType.Cobblestone,
-    ];
-
-    // ---- Starting platform (large, at y=3) ----
     const startY = 3;
     const startSize = 6;
     const startX = 3;
     const startZ = 3;
 
-    // Fill support under start platform
     for (let x = startX; x < startX + startSize && x < W - 1; x++) {
       for (let z = startZ; z < startZ + startSize && z < D - 1; z++) {
-        for (let y = 1; y < startY; y++) {
-          this.setBlock(x, y, z, BlockType.Stone);
-        }
-        this.setBlock(x, startY, z, BlockType.Planks);
+        for (let y = 1; y < startY; y++) this.setBlock(x, y, z, BlockType.Stone);
+        this.setBlock(x, startY, z, BlockType.OakPlanks);
       }
     }
 
-    // ---- Generate parkour path across levels ----
-    // Track position for path generation
     let curX = startX + startSize;
     let curZ = startZ + Math.floor(startSize / 2);
     let curY = startY;
 
     for (let level = 0; level < numLevels; level++) {
       const surfaceBlock = levelBlocks[level % levelBlocks.length];
-
-      // Number of platforms on this level (4-7)
       const platformsPerLevel = 4 + Math.floor(rng() * 4);
 
       for (let p = 0; p < platformsPerLevel; p++) {
-        // Gap: 2-4 blocks (jumpable distance)
         const gap = 2 + Math.floor(rng() * 3);
-        // Platform size: 3-6 blocks
         const pSize = 3 + Math.floor(rng() * 4);
 
-        // Move in a direction (pick new direction periodically)
         let dirX = 0, dirZ = 0;
         const dirRoll = rng();
-        if (dirRoll < 0.5) { dirX = 1; dirZ = 0; }
-        else if (dirRoll < 0.75) { dirX = -1; dirZ = 0; }
-        else if (dirRoll < 0.875) { dirX = 0; dirZ = 1; }
-        else { dirX = 0; dirZ = -1; }
+        if (dirRoll < 0.5) { dirX = 1; }
+        else if (dirRoll < 0.75) { dirX = -1; }
+        else if (dirRoll < 0.875) { dirZ = 1; }
+        else { dirZ = -1; }
 
-        // Calculate next position
         let nx = curX + dirX * gap;
         let nz = curZ + dirZ * gap;
 
-        // Bounds checking - keep platform inside world
         if (nx < 1 || nx + pSize >= W - 1 || nz < 1 || nz + pSize >= D - 1) {
-          // Pick a safe random position
           nx = 2 + Math.floor(rng() * Math.max(1, W - pSize - 4));
           nz = 2 + Math.floor(rng() * Math.max(1, D - pSize - 4));
         }
 
-        // Build the platform
-        let placed = false;
         for (let px = nx; px < nx + pSize && px < W - 1; px++) {
           for (let pz = nz; pz < nz + pSize && pz < D - 1; pz++) {
-            // Support column from y=1 to curY-1 (only at corners for performance)
-            if (px === nx && pz === nz || px === nx + pSize - 1 && pz === nz ||
-                px === nx && pz === nz + pSize - 1 || px === nx + pSize - 1 && pz === nz + pSize - 1) {
-              for (let y = 1; y < curY; y++) {
-                this.setBlock(px, y, pz, BlockType.Stone);
-              }
+            if ((px === nx || px === nx + pSize - 1) && (pz === nz || pz === nz + pSize - 1)) {
+              for (let y = 1; y < curY; y++) this.setBlock(px, y, pz, BlockType.Stone);
             }
             this.setBlock(px, curY, pz, surfaceBlock);
-            placed = true;
           }
         }
-
-        if (placed) {
-          curX = nx;
-          curZ = nz + Math.floor(pSize / 2);
-        }
+        curX = nx + pSize;
+        curZ = nz + Math.floor(pSize / 2);
       }
 
-      // ---- Transition to next level: upward staircase ----
       if (level < numLevels - 1) {
-        const nextY = curY + levelStep;
-        // Place 2-3 stepping stones going upward
         const stepsCount = 2 + Math.floor(rng() * 2);
         for (let step = 0; step < stepsCount; step++) {
           const stepX = curX + 1 + step;
           const stepZ = curZ;
           const stepY = curY + 1 + Math.floor((step / stepsCount) * levelStep);
-
           if (stepX < W - 1 && stepZ >= 1 && stepZ < D - 1 && stepY < H - 2) {
-            // Build a small 2x2 platform at each step height
             for (let dx = 0; dx < 2; dx++) {
               for (let dz = -1; dz <= 0; dz++) {
                 const bx = stepX + dx;
                 const bz = stepZ + dz;
                 if (bx >= 1 && bx < W - 1 && bz >= 1 && bz < D - 1) {
-                  // Support pillar
-                  for (let y = 1; y < stepY; y++) {
-                    this.setBlock(bx, y, bz, BlockType.Stone);
-                  }
-                  // Surface
-                  this.setBlock(bx, stepY, bz, BlockType.Planks);
+                  for (let y = 1; y < stepY; y++) this.setBlock(bx, y, bz, BlockType.Stone);
+                  this.setBlock(bx, stepY, bz, BlockType.OakPlanks);
                 }
               }
             }
           }
         }
         curX += stepsCount + 1;
-        curY = nextY;
-
-        // Bounds reset if went too far
+        curY += levelStep;
         if (curX >= W - 8) {
           curX = 3;
           curZ = 3 + Math.floor(rng() * Math.max(1, D - 10));
@@ -344,24 +387,15 @@ export class VoxelWorld {
       }
     }
 
-    // ---- Finish platform at the top ----
     const finishY = curY;
     if (finishY < H - 4) {
       const finishSize = 6;
       const finishX = Math.max(2, Math.min(W - finishSize - 2, Math.floor(W / 2) - 3));
       const finishZ = Math.max(2, Math.min(D - finishSize - 2, Math.floor(D / 2) - 3));
-
       for (let x = finishX; x < finishX + finishSize && x < W - 1; x++) {
         for (let z = finishZ; z < finishZ + finishSize && z < D - 1; z++) {
           for (let y = 1; y <= finishY; y++) {
             this.setBlock(x, y, z, y === finishY ? BlockType.Snow : BlockType.Stone);
-          }
-          // Corner pillars
-          if ((x === finishX || x === finishX + finishSize - 1) &&
-              (z === finishZ || z === finishZ + finishSize - 1)) {
-            for (let y = finishY + 1; y <= finishY + 3 && y < H; y++) {
-              this.setBlock(x, y, z, BlockType.Cobblestone);
-            }
           }
         }
       }
@@ -381,10 +415,10 @@ export class VoxelWorld {
         return Math.max(1, Math.min(H - 6, Math.floor(h)));
       }
       case 'mountains': {
-        let h = H * 0.25;
-        h += Math.sin(nx * Math.PI * 3 + seed * 0.1) * H * 0.15;
-        h += Math.cos(nz * Math.PI * 4 + seed * 0.2) * H * 0.12;
-        h += Math.sin((nx + nz) * Math.PI * 5 + seed * 0.3) * H * 0.1;
+        let h = H * 0.30;
+        h += Math.sin(nx * Math.PI * 3 + seed * 0.1) * H * 0.18;
+        h += Math.cos(nz * Math.PI * 4 + seed * 0.2) * H * 0.14;
+        h += Math.sin((nx + nz) * Math.PI * 5 + seed * 0.3) * H * 0.10;
         h += Math.sin(nx * Math.PI * 12 + nz * Math.PI * 10 + seed * 0.5) * H * 0.04;
         return Math.max(1, Math.min(H - 6, Math.floor(h)));
       }
@@ -398,28 +432,29 @@ export class VoxelWorld {
         h *= Math.max(0, 1 - dist * 2.2);
         return Math.max(0, Math.min(H - 6, Math.floor(h)));
       }
-      default: { // normal
-        let h = H * 0.2;
-        h += Math.sin(nx * Math.PI * 3 + seed * 0.1) * H * 0.08;
+      default: {
+        let h = H * 0.22;
+        h += Math.sin(nx * Math.PI * 3 + seed * 0.1) * H * 0.09;
         h += Math.cos(nz * Math.PI * 2.5 + seed * 0.2) * H * 0.07;
         h += Math.sin((nx + nz) * Math.PI * 5 + seed * 0.3) * H * 0.05;
-        h += Math.sin(nx * Math.PI * 9 + nz * Math.PI * 7 + seed * 0.5) * H * 0.02;
+        h += Math.sin(nx * Math.PI * 9 + nz * Math.PI * 7 + seed * 0.5) * H * 0.025;
         return Math.max(1, Math.min(H - 6, Math.floor(h)));
       }
     }
   }
 
   // ==========================================
-  // Chunk Mesh Building
+  // Mesh Building (with emissive)
   // ==========================================
 
-  buildChunkMesh(cx: number, cz: number): { vertices: number[]; normals: number[]; colors: number[]; indices: number[] } | null {
+  buildChunkMesh(cx: number, cz: number): { vertices: number[]; normals: number[]; colors: number[]; indices: number[]; emissive: number[] } | null {
     const chunk = this.getChunk(cx, cz);
     if (!chunk || chunk.isEmpty()) return null;
 
     const vertices: number[] = [];
     const normals: number[] = [];
     const colors: number[] = [];
+    const emissive: number[] = [];
     const indices: number[] = [];
     let vertCount = 0;
 
@@ -436,23 +471,30 @@ export class VoxelWorld {
 
           const wx = wx0 + lx;
           const wz = wz0 + lz;
+          const em = bd.emissive || 0;
 
-          if (!this.isSolid(wx, ly + 1, wz)) { this.addFace(wx, ly, wz, 'top', bd.top, vertices, normals, colors, indices, vertCount); vertCount += 4; }
-          if (!this.isSolid(wx, ly - 1, wz)) { this.addFace(wx, ly, wz, 'bottom', bd.bottom, vertices, normals, colors, indices, vertCount); vertCount += 4; }
-          if (!this.isSolid(wx + 1, ly, wz)) { this.addFace(wx, ly, wz, 'east', bd.side, vertices, normals, colors, indices, vertCount); vertCount += 4; }
-          if (!this.isSolid(wx - 1, ly, wz)) { this.addFace(wx, ly, wz, 'west', bd.side, vertices, normals, colors, indices, vertCount); vertCount += 4; }
-          if (!this.isSolid(wx, ly, wz + 1)) { this.addFace(wx, ly, wz, 'south', bd.side, vertices, normals, colors, indices, vertCount); vertCount += 4; }
-          if (!this.isSolid(wx, ly, wz - 1)) { this.addFace(wx, ly, wz, 'north', bd.side, vertices, normals, colors, indices, vertCount); vertCount += 4; }
+          // Face culling: only add face if adjacent block is air or transparent
+          const addFace = (face: string, color: number[]) => {
+            this.addFaceData(wx, ly, wz, face, color, em, vertices, normals, colors, emissive, indices, vertCount);
+            vertCount += 4;
+          };
+
+          if (!this.isSolid(wx, ly + 1, wz)) addFace('top', bd.top);
+          if (!this.isSolid(wx, ly - 1, wz)) addFace('bottom', bd.bottom);
+          if (!this.isSolid(wx + 1, ly, wz)) addFace('east', bd.side);
+          if (!this.isSolid(wx - 1, ly, wz)) addFace('west', bd.side);
+          if (!this.isSolid(wx, ly, wz + 1)) addFace('south', bd.side);
+          if (!this.isSolid(wx, ly, wz - 1)) addFace('north', bd.side);
         }
       }
     }
 
     chunk.dirty = false;
-    return { vertices, normals, colors, indices };
+    return { vertices, normals, colors, indices, emissive };
   }
 
-  private addFace(x: number, y: number, z: number, face: string, color: number[],
-    verts: number[], norms: number[], cols: number[], idx: number[], offset: number) {
+  private addFaceData(x: number, y: number, z: number, face: string, color: number[], em: number,
+    verts: number[], norms: number[], cols: number[], emis: number[], idx: number[], offset: number) {
     const faces: Record<string, { pos: number[][]; normal: number[] }> = {
       top:    { pos: [[x,y+1,z],[x,y+1,z+1],[x+1,y+1,z+1],[x+1,y+1,z]], normal: [0,1,0] },
       bottom: { pos: [[x,y,z+1],[x,y,z],[x+1,y,z],[x+1,y,z+1]], normal: [0,-1,0] },
@@ -467,6 +509,7 @@ export class VoxelWorld {
       verts.push(p[0], p[1], p[2]);
       norms.push(f.normal[0], f.normal[1], f.normal[2]);
       cols.push(color[0], color[1], color[2]);
+      emis.push(em);
     }
     idx.push(offset, offset + 1, offset + 2, offset, offset + 2, offset + 3);
   }
@@ -478,9 +521,7 @@ export class VoxelWorld {
   serializeChunks(): Map<string, string> {
     const result = new Map<string, string>();
     for (const [key, chunk] of this.chunks) {
-      if (!chunk.isEmpty()) {
-        result.set(key, chunk.serialize());
-      }
+      if (!chunk.isEmpty()) result.set(key, chunk.serialize());
     }
     return result;
   }
@@ -496,7 +537,6 @@ export class VoxelWorld {
     }
   }
 
-  // Find safe spawn point
   findSpawnPoint(): { x: number; y: number; z: number } {
     const sx = Math.floor(this.worldWidth / 2);
     const sz = Math.floor(this.worldDepth / 2);
